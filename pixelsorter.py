@@ -120,7 +120,6 @@ class PixelSorter:
 
         def setSorter(self, sorter):
             self.sorter = sorter
-            # def run(detector: AbstractSorter, sorter: AbstractSorter):
 
         def apply(self, img: np.ndarray, use_tqdm=False):
             new_img = img.copy()
@@ -141,12 +140,6 @@ if __name__ == "__main__":
 
     # User choice for files
     image = Path("/home/xpsyc/Documents/HiddenStuff/val_HR/ZunmBXs.jpg")
-
-    # changes which direction the sorters will go
-    swap_horizontal = False
-    swap_vertical = True
-    swap_axes = True
-    preview = True
 
     # sensitivity of the filter
     thresh = 76

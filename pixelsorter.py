@@ -1,135 +1,159 @@
-import os
-from glob import glob
 from pathlib import Path
 
 import cv2
 import numpy as np
 from tqdm import tqdm
-from multiprocessing import Pool
-# from iterable_starmap import CustomPool
-import multiprocessing as mp
-
-def get_file_list(*folders: Path) -> list[Path]:
-    """
-    Args    folders: One or more folder paths.
-    Returns list[Path]: paths in the specified folders."""
-    return [Path(y) for x in (glob(str(p), recursive=True) for p in folders) for y in x]
 
 
-def pix_to_luma(pix):
-    B, G, R = pix[0, 0]
-    return (0.299*R + 0.587*G + 0.114*B)
+class PixelSorter:
+    class AbstractSorter:
+        def __init__(self, img: np.ndarray, thresh: int = None):
+            self.img = img
+            self.thresh = thresh
+            self.gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
-def compare_two_pixels(pix1, pix2):
-    pass
+        def __repr__(self):
+            attrlist = []
+            for key, val in self.__dict__.items():
+                if hasattr(val, "__iter__") and not isinstance(val, str):
+                    attrlist.append(f"{key}=...")
+                else:
+                    attrlist.append(f"{key}={val}")
+            out = ", ".join(attrlist)
+            return f"{self.__class__.__name__}({out})"
 
+        def pix_set_sort(self, pix_set, gray_set):
+            return np.take_along_axis(
+                pix_set,
+                np.argsort(cv2.cvtColor(
+                    gray_set,
+                    cv2.COLOR_GRAY2BGR
+                ), axis=1),
+                axis=1)
 
+        def iterate_through_row(self, row: int, pix_set_sorter=None):
+            if not self.thresh:
+                raise AttributeError("No threshold was given during initialization.")
+            if not pix_set_sorter:
+                pix_set_sorter = self
+                gray_row = self.gray[row:row + 1]
+            else:
+                gray_row = pix_set_sorter.gray[row:row+1]
+            selected_row = self.img[row:row + 1]
+            pivot = 0
+            column_sets = []
+            for col in range(1, img.shape[1]):
+                if abs(int(self.gray[row, pivot]) - int(self.gray[row, col])) > self.thresh:
+                    column_sets.append(pix_set_sorter.pix_set_sort(selected_row[:, pivot:col],
+                                                                   gray_row[:, pivot:col]
+                                                                   ))
+                    pivot = col
+            column_sets.append(pix_set_sorter.pix_set_sort(selected_row[:, pivot:],
+                                                           gray_row[:, pivot:]))
+            return np.concatenate(column_sets, axis=1)
 
+    class Red(AbstractSorter):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.gray = img[:, :, 2]
 
-def pixelsort(img: np.ndarray, diff: int, preview=False, use_tqdm=False, preview_scale=512):
-    edges = cv2.GaussianBlur(img, (3, 3), 0)
-    edges = cv2.Canny(edges, diff, diff)
-    edges = edges != 0
+    class Green(AbstractSorter):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.gray = img[:, :, 1]
 
-    if preview:
-        # resize to a 512 x 512 image for preview
-        scale = preview_scale * (1/max(edges.shape))
-        cv2.imshow('edges', cv2.resize(np.array(edges, dtype=np.uint8) * 255, (0, 0), fx=scale, fy=scale))
+    class Blue(AbstractSorter):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.gray = img[:, :, 0]
 
-    cv2.waitKey(1)
+    class Hue(AbstractSorter):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.gray = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)[:, :, 0]
 
-    img_h = img
-    # img_h = np.clip((img - 50), a_min=1, a_max=255)
-    row_sets = []
-    iter_obj = range(img.shape[0])
-    if use_tqdm:
-        iter_obj = tqdm(iter_obj)
-    for row in iter_obj:
+    class Saturation(AbstractSorter):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.gray = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)[:, :, 1]
 
-        given_col = img[row:row + 1]
-        pivot = 0
-        pix_sets = []
-        # sample_luma = pix_to_luma(sample)
-        for col in range(img.shape[1]):
+    class Value(AbstractSorter):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.gray = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)[:, :, 2]
 
-            # * this is used for comparing pixels on the fly
-            # new_sample = given_col[:, col:col + 1]
-            # new_sample_luma = pix_to_luma(new_sample)
-            # newdiff = abs(new_sample_luma - sample_luma)
-            # print(edges[row:row + 1, col:col+1])
-            # if newdiff > diff:
+    class Canny(AbstractSorter):
+        def __init__(self, img: np.ndarray, diff: int, blur_size: tuple[int, int] = (3, 3), sigma: int = 0):
 
-            # a pixel will end a set and start the new set
-            if edges[row:row + 1, col:col + 1][0, 0]:
-                pix_sets.append(np.sort(given_col[:, pivot:col], axis=1))
-                pivot = col
-        pix_sets.append(np.sort(given_col[:, pivot:], axis=1))
-        row_sets.append(np.concatenate((pix_sets), axis=1))
+            self.img = img
+            self.gray = cv2.Canny(cv2.GaussianBlur(img, blur_size, sigma), diff, diff)
 
-    img_h = np.concatenate(row_sets, axis=0)
-    return img_h
+        def iterate_through_row(self, row: int, pix_set_sorter=None):
+            if not pix_set_sorter:
+                pix_set_sorter = self
+                gray_row = self.gray[row:row+1]
+            else:
+                gray_row = pix_set_sorter.gray[row:row+1]
+            selected_row = self.img[row:row + 1]
+            pivot = 0
+            column_sets = []
+            for col in range(1, img.shape[1]):
+                if self.gray[row:row+1, col:col+1][0, 0]:
+                    column_sets.append(pix_set_sorter.pix_set_sort(selected_row[:, pivot:col],
+                                                                   gray_row[:, pivot:col]))
+                    pivot = col
+            column_sets.append(pix_set_sorter.pix_set_sort(selected_row[:, pivot:],
+                                                           gray_row[:, pivot:]))
+            return np.concatenate(column_sets, axis=1)
 
+        def pix_set_sort(self, pix_set, gray_set):
+            gray_set = cv2.cvtColor(pix_set, cv2.COLOR_BGR2GRAY)
+            return super().pix_set_sort(pix_set, gray_set)
 
-def sort_and_write(img, out, diff, preview, horiz, vertical, axes):
-    img = cv2.imread(str(img))
+    class Manager:
+        def __init__(self, detector, sorter=None):
+            self.detector = detector
+            self.sorter = sorter
 
-    if vertical and horiz:
-        img = img[::-1, ::-1]
-    if vertical:
-        img = img[::-1]
-    if horiz:
-        img = img[:, ::-1]
-    if axes:
-        img = img.swapaxes(0, 1)
-    img = pixelsort(img, diff, preview=preview)
-    if axes:
-        img = img.swapaxes(0, 1)
-    if vertical and horiz:
-        img = img[::-1, ::-1]
-    if vertical:
-        img = img[::-1]
-    if horiz:
-        img = img[:, ::-1]
+        def setDetector(self, detector):
+            self.detector = detector
 
-    cv2.imwrite(out, img)
+        def setSorter(self, sorter):
+            self.sorter = sorter
+            # def run(detector: AbstractSorter, sorter: AbstractSorter):
+
+        def apply(self, img: np.ndarray, use_tqdm=False):
+            new_img = img.copy()
+            iterable = range(img.shape[0])
+            if use_tqdm:
+                iterable = tqdm(iterable)
+            for row in iterable:
+                args = [row]
+                if self.sorter is not None:
+                    args.append(self.sorter)
+                new_img[row] = self.detector.iterate_through_row(
+                    *args
+                )
+            return new_img
 
 
 if __name__ == "__main__":
-    mp.freeze_support()
 
     # User choice for files
-    # path = Path("/mnt/Toshiba/GitHub/Console_Image_Utils/sequence/*")
-    # path = Path("pfp.png")
-    images = [Path("C:/Users/xpsyc/Pictures/pfp.png")]
-    
-    # img = cv2.imread(str(images[0]))
-    # cv2.imshow('imge', img)
-    # cv2.waitKey(0)
-    # exit()
-    # images = sorted(get_file_list(path))
-
-    # whitelist = ['safe']
-    # images = {j for i in whitelist for j in images if i in str(j)}
-
-    # out = path.parent.with_name(f"{path.parent.name}-pixelsorted")
-    out = Path("C:/Users/xpsyc/Pictures/pfp-pixelsorted.png")
-    # out.mkdir(exist_ok=True)
+    image = Path("/home/xpsyc/Documents/HiddenStuff/val_HR/ZunmBXs.jpg")
 
     # changes which direction the sorters will go
     swap_horizontal = False
     swap_vertical = True
     swap_axes = True
-    # sensitivity of Canny edge detection
-    diff = 32
     preview = True
 
-    argtuples = [(img, str(out/img.name), diff, preview, swap_horizontal, swap_vertical, swap_axes)
-                 for img in images]
+    # sensitivity of the filter
+    thresh = 76
+    img = cv2.imread(str(image))
+    out = PixelSorter.Manager(
+        PixelSorter.Canny(img, thresh),
+        PixelSorter.AbstractSorter(img)
+    ).apply(img, use_tqdm=True)
 
-    threads = int(os.cpu_count() / 4 * 3)
-    # threads = 4
-    with Pool(min(threads, len(argtuples))) as p:
-        out = p.starmap(sort_and_write, argtuples)
-        # out = list(tqdm(p.istarmap(sort_and_write, argtuples), total=len(images)))
-
-    cv2.destroyAllWindows()
+    cv2.imwrite('out.png', out)

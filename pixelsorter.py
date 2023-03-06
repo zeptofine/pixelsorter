@@ -5,7 +5,8 @@ from pathlib import Path
 import cv2
 import numpy as np
 from tqdm import tqdm
-from iterable_starmap import CustomPool
+from multiprocessing import Pool
+# from iterable_starmap import CustomPool
 import multiprocessing as mp
 
 def get_file_list(*folders: Path) -> list[Path]:
@@ -97,14 +98,22 @@ if __name__ == "__main__":
     mp.freeze_support()
 
     # User choice for files
-    path = Path("/mnt/Toshiba/GitHub/Console_Image_Utils/sequence/*")
-    images = sorted(get_file_list(path))
+    # path = Path("/mnt/Toshiba/GitHub/Console_Image_Utils/sequence/*")
+    # path = Path("pfp.png")
+    images = [Path("C:/Users/xpsyc/Pictures/pfp.png")]
+    
+    # img = cv2.imread(str(images[0]))
+    # cv2.imshow('imge', img)
+    # cv2.waitKey(0)
+    # exit()
+    # images = sorted(get_file_list(path))
 
     # whitelist = ['safe']
     # images = {j for i in whitelist for j in images if i in str(j)}
 
-    out = path.parent.with_name(f"{path.parent.name}-pixelsorted")
-    out.mkdir(exist_ok=True)
+    # out = path.parent.with_name(f"{path.parent.name}-pixelsorted")
+    out = Path("C:/Users/xpsyc/Pictures/pfp-pixelsorted.png")
+    # out.mkdir(exist_ok=True)
 
     # changes which direction the sorters will go
     swap_horizontal = False
@@ -119,7 +128,8 @@ if __name__ == "__main__":
 
     threads = int(os.cpu_count() / 4 * 3)
     # threads = 4
-    with CustomPool(min(threads, len(argtuples))) as p:
-        out = list(tqdm(p.istarmap(sort_and_write, argtuples), total=len(images)))
+    with Pool(min(threads, len(argtuples))) as p:
+        out = p.starmap(sort_and_write, argtuples)
+        # out = list(tqdm(p.istarmap(sort_and_write, argtuples), total=len(images)))
 
     cv2.destroyAllWindows()

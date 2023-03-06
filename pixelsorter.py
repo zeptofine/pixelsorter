@@ -6,7 +6,7 @@ import cv2
 import numpy as np
 from tqdm import tqdm
 from iterable_starmap import CustomPool
-
+import multiprocessing as mp
 
 def get_file_list(*folders: Path) -> list[Path]:
     """
@@ -18,6 +18,11 @@ def get_file_list(*folders: Path) -> list[Path]:
 def pix_to_luma(pix):
     B, G, R = pix[0, 0]
     return (0.299*R + 0.587*G + 0.114*B)
+
+def compare_two_pixels(pix1, pix2):
+    pass
+
+
 
 
 def pixelsort(img: np.ndarray, diff: int, preview=False, use_tqdm=False, preview_scale=512):
@@ -89,6 +94,7 @@ def sort_and_write(img, out, diff, preview, horiz, vertical, axes):
 
 
 if __name__ == "__main__":
+    mp.freeze_support()
 
     # User choice for files
     path = Path("/mnt/Toshiba/GitHub/Console_Image_Utils/sequence/*")
@@ -113,7 +119,7 @@ if __name__ == "__main__":
 
     threads = int(os.cpu_count() / 4 * 3)
     # threads = 4
-    with CustomPool(threads) as p:
+    with CustomPool(min(threads, len(argtuples))) as p:
         out = list(tqdm(p.istarmap(sort_and_write, argtuples), total=len(images)))
 
     cv2.destroyAllWindows()

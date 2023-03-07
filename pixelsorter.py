@@ -42,7 +42,7 @@ class PixelSorter:
             selected_row = self.img[row:row + 1]
             pivot = 0
             column_sets = []
-            for col in range(1, img.shape[1]):
+            for col in range(1, self.img.shape[1]):
                 if abs(int(self.gray[row, pivot]) - int(self.gray[row, col])) > self.thresh:
                     column_sets.append(pix_set_sorter.pix_set_sort(selected_row[:, pivot:col],
                                                                    gray_row[:, pivot:col]
@@ -100,7 +100,7 @@ class PixelSorter:
             selected_row = self.img[row:row + 1]
             pivot = 0
             column_sets = []
-            for col in range(1, img.shape[1]):
+            for col in range(1, self.img.shape[1]):
                 if self.gray[row:row+1, col:col+1][0, 0]:
                     column_sets.append(pix_set_sorter.pix_set_sort(selected_row[:, pivot:col],
                                                                    gray_row[:, pivot:col]))

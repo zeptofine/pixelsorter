@@ -83,12 +83,15 @@ class PixelSorter:
             self.gray = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)[:, :, 2]
 
     class Canny(AbstractSorter):
-        def __init__(self, img: np.ndarray, diff: int, blur_size: tuple[int, int] = (3, 3), sigma: int = 0):
+        def __init__(self, img: np.ndarray = None, diff: int = None, blur_size: tuple[int, int] = (3, 3), sigma: int = 0):
 
             self.img = img
-            self.gray = cv2.Canny(cv2.GaussianBlur(img, blur_size, sigma), diff, diff)
+            if diff:
+                self.gray = cv2.Canny(cv2.GaussianBlur(img, blur_size, sigma), diff, diff)
 
         def iterate_through_row(self, row: int, pix_set_sorter=None):
+            if not self.img or self.gray:
+                raise RuntimeError("No image or diff was specified during creation")
             if not pix_set_sorter:
                 pix_set_sorter = self
                 gray_row = self.gray[row:row+1]
@@ -111,7 +114,7 @@ class PixelSorter:
             return super().pix_set_sort(pix_set, gray_set)
 
     class Manager:
-        def __init__(self, detector, sorter=None):
+        def __init__(self, detector=None, sorter=None):
             self.detector = detector
             self.sorter = sorter
 
@@ -122,6 +125,8 @@ class PixelSorter:
             self.sorter = sorter
 
         def apply(self, img: np.ndarray, use_tqdm=False):
+            if not self.detector:
+                raise RuntimeError("No detector is found in manager")
             new_img = img.copy()
             iterable = range(img.shape[0])
             if use_tqdm:

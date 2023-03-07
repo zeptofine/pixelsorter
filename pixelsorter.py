@@ -90,7 +90,7 @@ class PixelSorter:
                 self.gray = cv2.Canny(cv2.GaussianBlur(img, blur_size, sigma), diff, diff)
 
         def iterate_through_row(self, row: int, pix_set_sorter=None):
-            if not self.img or self.gray:
+            if self.img is None:
                 raise RuntimeError("No image or diff was specified during creation")
             if not pix_set_sorter:
                 pix_set_sorter = self

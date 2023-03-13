@@ -7,13 +7,13 @@ from tqdm import tqdm
 
 class AbstractSorter:
     def __init__(self, thresh: int = None):
-        self.setThresh(thresh)
+        self.set_thresh(thresh)
 
     def apply(self, img: np.ndarray):
         self.img = img
         self.gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
-    def setThresh(self, thresh):
+    def set_thresh(self, thresh):
         self.thresh = thresh
 
     def __repr__(self):
@@ -28,49 +28,42 @@ class AbstractSorter:
         return f"{self.__class__.__name__}({out})"
 
     def pix_set_sort(self, pix_set, gray_set):
-        return np.take_along_axis(
-            pix_set,
-            np.argsort(cv2.cvtColor(
-                gray_set,
-                cv2.COLOR_GRAY2BGR
-            ), axis=1),
-            axis=1)
+        new_sets = list(zip(*sorted(zip(gray_set, pix_set), key=lambda x: x[0])))[1]
+        return np.stack(new_sets)
 
     def iterate_through_row(self, row: int, pix_set_sorter=None):
         if not self.thresh:
             raise AttributeError("No threshold was given during initialization.")
         if not pix_set_sorter:
             pix_set_sorter = self
-            gray_row = self.gray[row:row + 1]
+            gray_row = self.gray[row]
         else:
-            gray_row = pix_set_sorter.gray[row:row+1]
-        selected_row = self.img[row:row + 1]
+            gray_row = pix_set_sorter.gray[row]
+        selected_row = self.img[row]
         pivot = 0
         column_sets = []
         for col in range(1, self.img.shape[1]):
             if abs(int(self.gray[row, pivot]) - int(self.gray[row, col])) > self.thresh:
-                column_sets.append(pix_set_sorter.pix_set_sort(selected_row[:, pivot:col],
-                                                               gray_row[:, pivot:col]
+                column_sets.append(pix_set_sorter.pix_set_sort(selected_row[pivot:col],
+                                                               gray_row[pivot:col]
                                                                ))
                 pivot = col
-        column_sets.append(pix_set_sorter.pix_set_sort(selected_row[:, pivot:],
-                                                       gray_row[:, pivot:]))
-        return np.concatenate(column_sets, axis=1)
+        column_sets.append(pix_set_sorter.pix_set_sort(selected_row[pivot:],
+                                                       gray_row[pivot:]))
+        return np.concatenate(column_sets, axis=0)
 
 
-class Hue(AbstractSorter):
+class HSV(AbstractSorter):
+    def __init__(self, thresh, type: int):
+        '''
+        type: H,S,V = 0, 1, 2
+        '''
+        self.thresh = thresh
+        self.type = type
+
     def apply(self, img: np.ndarray):
-        self.gray = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)[:, :, 0]
-
-
-class Saturation(AbstractSorter):
-    def apply(self, img: np.ndarray):
-        self.gray = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)[:, :, 1]
-
-
-class Value(AbstractSorter):
-    def apply(self, img: np.ndarray):
-        self.gray = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)[:, :, 2]
+        self.img = img
+        self.gray = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)[:, :, self.type]
 
 
 class Canny(AbstractSorter):
@@ -90,24 +83,32 @@ class Canny(AbstractSorter):
             raise RuntimeError("No image or diff was specified during creation")
         if not pix_set_sorter:
             pix_set_sorter = self
-            gray_row = self.gray[row:row+1]
+            gray_row = self.gray[row]
         else:
-            gray_row = pix_set_sorter.gray[row:row+1]
-        selected_row = self.img[row:row + 1]
+            gray_row = pix_set_sorter.gray[row]
         pivot = 0
         column_sets = []
+        selected_row: np.ndarray = self.img[row]
+
         for col in range(1, self.img.shape[1]):
-            if self.gray[row:row+1, col:col+1][0, 0]:
-                column_sets.append(pix_set_sorter.pix_set_sort(selected_row[:, pivot:col],
-                                                               gray_row[:, pivot:col]))
+            if self.gray[row, col]:
+                column_sets.append(pix_set_sorter.pix_set_sort(selected_row[pivot:col], gray_row[pivot:col]))
                 pivot = col
-        column_sets.append(pix_set_sorter.pix_set_sort(selected_row[:, pivot:],
-                                                       gray_row[:, pivot:]))
-        return np.concatenate(column_sets, axis=1)
+        column_sets.append(pix_set_sorter.pix_set_sort(selected_row[pivot:], gray_row[pivot:]))
+
+        pix_sets = np.concatenate(column_sets, axis=0)
+        return pix_sets
 
     def pix_set_sort(self, pix_set, gray_set):
-        gray_set = cv2.cvtColor(pix_set, cv2.COLOR_BGR2GRAY)
         return super().pix_set_sort(pix_set, gray_set)
+
+
+class ViaImage(Canny):
+    def __init__(self, gray: np.ndarray):
+        self.gray = gray
+
+    def apply(self, img: np.ndarray):
+        self.img = img
 
 
 class SorterManager:
@@ -136,10 +137,11 @@ class SorterManager:
         if use_tqdm:
             iterable = tqdm(iterable)
 
+        if self.sorter is not None:
+            self.sorter.apply(img)
         for row in iterable:
             args = [row]
             if self.sorter is not None:
-                self.sorter.apply(img)
                 args.append(self.sorter)
 
             # Run the detector on the given row
@@ -157,10 +159,10 @@ if __name__ == "__main__":
     sorter = SorterManager()
 
     # Add the sorter that decides how to separate the sets of pixels
-    sorter.setDetector(Canny(150))
+    sorter.setDetector(Canny(128))
 
     # Adds the sorter that changes how the sets of pixels are sorted
-    # sorter.setSorter(PixelSorter.Saturation())
+    sorter.setSorter(AbstractSorter())
 
     # Run the sorters on an image
     out = sorter.apply(img, use_tqdm=True)

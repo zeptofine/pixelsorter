@@ -1,8 +1,33 @@
+import argparse
 from pathlib import Path
 
 import cv2
 import numpy as np
 from tqdm import tqdm
+import sys
+from multiprocessing import Pool
+
+
+def main_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser()
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument('-i', '--img', type=str, help="Input to a file to be run.")
+    modes.add_argument('--folder', type=str,
+                       help="Input to a directory of files to be run. accepts png, jpeg, webp")
+    parser.add_argument("--threads", type=int, default=2, help="number of threads to run the images in parallel.")
+    parser.add_argument("--threshold", help="Threshold for the sorter algo", default=64)
+    parser.add_argument("--resume", action="store_true", help="continues a folder render.")
+    return parser
+
+
+def get_file_list(folder: Path, *exts) -> list[Path]:
+    """
+    Args    folders: One or more folder paths.
+    Returns list[Path]: paths in the specified folders."""
+    out = []
+    for ext in exts:
+        out.extend(folder.glob(ext))
+    return out
 
 
 class AbstractSorter:
@@ -92,15 +117,15 @@ class Canny(AbstractSorter):
 
         for col in range(1, self.img.shape[1]):
             if self.gray[row, col]:
-                column_sets.append(pix_set_sorter.pix_set_sort(selected_row[pivot:col], gray_row[pivot:col]))
+                column_sets.append(pix_set_sorter.pix_set_sort(selected_row[pivot:col],
+                                                               gray_row[pivot:col]
+                                                               ))
                 pivot = col
-        column_sets.append(pix_set_sorter.pix_set_sort(selected_row[pivot:], gray_row[pivot:]))
-
+        column_sets.append(pix_set_sorter.pix_set_sort(selected_row[pivot:],
+                                                       gray_row[pivot:]
+                                                       ))
         pix_sets = np.concatenate(column_sets, axis=0)
         return pix_sets
-
-    def pix_set_sort(self, pix_set, gray_set):
-        return super().pix_set_sort(pix_set, gray_set)
 
 
 class ViaImage(Canny):
@@ -117,16 +142,20 @@ class SorterManager:
         self.setSorter(sorter)
 
     def setDetector(self, detector):
-        self.detector = detector
+        self.detector: AbstractSorter = detector
 
     def setSorter(self, sorter):
-        self.sorter = sorter
+        self.sorter: AbstractSorter = sorter
 
-    def apply(self, img: np.ndarray, use_tqdm=False):
+    def assert_detector(self):
         # The detector is necessary for the sorter to work, but it can be added to the
         #   manager after initialization
         if not self.detector:
             raise RuntimeError("No detector is found in manager")
+
+    def apply(self, img: np.ndarray, use_tqdm=False):
+        self.assert_detector()
+
         self.detector.apply(img)
 
         # Make a copy of the image so the original is preserved
@@ -148,23 +177,77 @@ class SorterManager:
             new_img[row] = self.detector.iterate_through_row(*args)
         return new_img
 
+    def apply_pool(self, img: np.ndarray, threads=1):
+        self.assert_detector()
+
+        self.detector.apply(img)
+
+        # Make a copy of the image so the original is preserved
+        # (The detector and sorter only reads the image)
+        new_img = img.copy()
+
+        iterable = range(img.shape[0])
+
+        if self.sorter:
+            self.sorter.apply(img)
+            pargs = zip(iterable, [self.sorter] * img.shape[0])
+        else:
+            pargs = iterable
+        # rprint(list(pargs))
+
+        with Pool(threads) as p:
+            iterable = pargs
+            # out = p.starmap(self.detector.iterate_through_row, iterable)
+            for idx, new_row in enumerate(p.starmap(self.detector.iterate_through_row, iterable)):
+                new_img[idx] = new_row
+        return new_img
+
 
 if __name__ == "__main__":
 
-    # User choice for files
-    image = Path("examples/PXL_20230111_164907475-resized.jpg")
-    img = cv2.imread(str(image))
+    args = main_parser().parse_args()
 
     # Initialize the sorter manager
     sorter = SorterManager()
 
     # Add the sorter that decides how to separate the sets of pixels
-    sorter.setDetector(Canny(128))
+    # sorter.setDetector(Canny(args.threshold))
+    args.threshold = int(args.threshold)
+    sorter.setDetector(AbstractSorter(args.threshold))
 
     # Adds the sorter that changes how the sets of pixels are sorted
-    sorter.setSorter(AbstractSorter())
+    # sorter.setSorter(AbstractSorter())
 
-    # Run the sorters on an image
-    out = sorter.apply(img, use_tqdm=True)
+    image_list = []
+    if args.img:  # The mode is a single image
+        image = Path(args.img)
+        if not image.exists():
+            print("Image does not exist")
+            sys.exit(1)
 
-    cv2.imwrite('out.png', out)
+        out_path = image.with_stem(f"{image.stem}-pixelsorted")
+        img = cv2.imread(str(image))
+        pxsorted = sorter.apply_pool(img, threads=args.threads)
+        cv2.imwrite(str(out_path), pxsorted)
+
+    elif args.folder:
+        folder = Path(args.folder)
+        out_folder = folder.with_stem(f"{folder.stem}-pixelsorted")
+        image_list = get_file_list(Path(args.folder), "*.png", "*.jpg", "*.webp")
+        out_dict = {image: out_folder / image.relative_to(folder) for image in image_list}
+        if args.resume:
+            image_list = [image for image in image_list if not out_dict[image].exists()]
+
+        def read_and_write(path: Path):
+            # img = cv2.imread(str(path))
+            out = out_dict[path]
+            img = cv2.imread(str(path))
+            pxsorted = sorter.apply(img)
+            cv2.imwrite(str(out), pxsorted)
+
+        with Pool(min(args.threads, len(image_list))) as p:
+            if not out_folder.exists():
+                out_folder.mkdir()
+            for _ in tqdm(p.imap(read_and_write, image_list), total=len(image_list)):
+                pass
+        print(f"Done! images are in {out_folder}")

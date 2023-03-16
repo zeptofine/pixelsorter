@@ -1,11 +1,11 @@
 import argparse
+import sys
+from multiprocessing import Pool
 from pathlib import Path
 
 import cv2
 import numpy as np
 from tqdm import tqdm
-import sys
-from multiprocessing import Pool
 
 
 def main_parser() -> argparse.ArgumentParser:
@@ -244,6 +244,10 @@ if __name__ == "__main__":
             img = cv2.imread(str(path))
             pxsorted = sorter.apply(img)
             cv2.imwrite(str(out), pxsorted)
+
+        if not image_list:
+            print("List is empty")
+            exit()
 
         with Pool(min(args.threads, len(image_list))) as p:
             if not out_folder.exists():

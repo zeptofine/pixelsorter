@@ -1,22 +1,37 @@
 import argparse
+import datetime
 import sys
-from multiprocessing import Pool
+from multiprocessing import Pool, Process, Queue
 from pathlib import Path
+import subprocess
 
 import cv2
+import ffmpeg
 import numpy as np
 from tqdm import tqdm
+import os
+from ConfigArgParser import ConfigParser
 
 
 def main_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument('-i', '--img', type=str, help="Input to a file to be run.")
     modes.add_argument('--folder', type=str,
                        help="Input to a directory of files to be run. accepts png, jpeg, webp")
-    parser.add_argument("--threads", type=int, default=2, help="number of threads to run the images in parallel.")
+    modes.add_argument('--video', type=str,
+                       help="path to a video to convert")
+    parser.add_argument("--threads", type=int, default=(os.cpu_count() / 4) * 3,
+                        help="number of threads to run the images in parallel.")
     parser.add_argument("--threshold", help="Threshold for the sorter algo", default=64)
     parser.add_argument("--resume", action="store_true", help="continues a folder render.")
+    gray_modes = parser.add_mutually_exclusive_group()
+    gray_modes.add_argument("--detector", choices=('default', 'hue', 'saturation', 'value', 'lightness', 'canny'),
+                            help="how the script identifies sets of pixels to sort", default='default')
+    gray_modes.add_argument("--gray_img", help="Path to the image to use as a threshold.")
+    parser.add_argument("--sorter", choices=('default', 'hue', 'saturation', 'value', 'lightness'),
+                        help="how the script sorts the sets of pixels", default='default')
+
     return parser
 
 
@@ -91,6 +106,27 @@ class HSV(AbstractSorter):
         self.gray = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)[:, :, self.type]
 
 
+class Hue(HSV):
+    def __init__(self, thresh):
+        super().__init__(thresh, 0)
+
+
+class Saturation(HSV):
+    def __init__(self, thresh):
+        super().__init__(thresh, 1)
+
+
+class Value(HSV):
+    def __init__(self, thresh):
+        super().__init__(thresh, 2)
+
+
+class Lightness(AbstractSorter):
+    def apply(self, img: np.ndarray):
+        self.img = img
+        self.gray = cv2.cvtColor(img, cv2.COLOR_BGR2HLS)[:, :, 2]
+
+
 class Canny(AbstractSorter):
     def __init__(self, thresh: int = None, blur_size=(3, 3), sigma: int = 0):
         self.thresh = thresh
@@ -130,7 +166,8 @@ class Canny(AbstractSorter):
 
 class ViaImage(Canny):
     def __init__(self, gray: np.ndarray):
-        self.gray = gray
+        # self.gray = gray
+        self.gray = cv2.cvtColor(gray, cv2.COLOR_BGR2GRAY)
 
     def apply(self, img: np.ndarray):
         self.img = img
@@ -203,55 +240,199 @@ class SorterManager:
         return new_img
 
 
+def check(condition, statement):
+    if not condition:
+        print(statement)
+        exit(1)
+
+
+def frame_reader(in_thread: subprocess.Popen, in_queue: Queue, shape, read_size, chunksize=12):
+    while True:
+        frame_stack = []
+        for _ in range(chunksize):
+            in_bytes = in_thread.stdout.read(read_size)
+            if not in_bytes:
+                break
+            frame_stack.append(np.frombuffer(in_bytes, np.uint8).reshape(shape))
+
+        if not frame_stack:
+            in_queue.put(None)
+            break
+
+        in_queue.put(frame_stack)
+
+
+def run_img(args: argparse.Namespace, sorter: SorterManager):
+    image = Path(args.img)
+    check(image.exists(), "Image does not exist")
+
+    out_path = image.with_stem(f"{image.stem}-pixelsorted")
+    print("Reading image...")
+    img = cv2.imread(str(image))
+    print("Sorting...")
+    pxsorted = sorter.apply(img)
+    cv2.imwrite(str(out_path), pxsorted)
+    print(f"saved to {out_path}")
+
+
+def run_folder(args: argparse.Namespace, sorter: SorterManager):
+    folder = Path(args.folder)
+    out_folder = folder.with_stem(f"{folder.stem}-pixelsorted")
+    print("getting list...")
+    image_list = get_file_list(Path(args.folder), "*.png", "*.jpg", "*.webp")
+    out_dict = {image: out_folder / image.relative_to(folder) for image in image_list}
+    if args.resume:
+        print("Filtering existing images...")
+        image_list = [image for image in image_list if not out_dict[image].exists()]
+
+    def read_and_write(path_out):
+        path, out = path_out
+        img = cv2.imread(str(path))
+        pxsorted = sorter.apply(img)
+        out.mkdir(exist_ok=True)
+        cv2.imwrite(str(out), pxsorted)
+
+    check(image_list, "List is empty")
+
+    pargs = [(image, out_dict[image]) for image in image_list]
+    with Pool(min(args.threads, len(image_list))) as p:
+        for _ in tqdm(p.imap(read_and_write, pargs), total=len(image_list)):
+            pass
+    print(f"Done! images are in {out_folder}")
+
+
+def run_video(args: argparse.Namespace, sorter: SorterManager):
+    video_path = Path(args.video)
+    out_path = video_path.with_stem(f"{video_path.stem}-pixelsorted")
+    check(video_path.exists(), "Video path does not exist")
+
+    # get video info
+    print("getting video info")
+    probe = ffmpeg.probe(args.video)
+    video_streams = [stream for stream in probe['streams'] if stream['codec_type'] == 'video']
+    # check(video_streams, "Video streams are empty")
+    video_stream = video_streams[0]
+    width = int(video_stream['width'])
+    height = int(video_stream['height'])
+
+    # get framerate
+    framerate = video_stream['r_frame_rate']
+    framerate = framerate.split('/')
+    framerate = int(framerate[0]) / int(framerate[1])
+
+    # get total frame count
+    # TODO: Find a faster way to get the total number of frames from the video
+    # ffprobe -v error -select_streams v:0 -count_frames -show_entries stream=nb_read_frames -print_format csv <file_path>
+    total_frames = int(subprocess.check_output([
+        "ffprobe", "-v", "error",
+        "-select_streams", "v:0",
+        "-count_frames", "-show_entries", "stream=nb_read_frames",
+        "-print_format", "csv", str(video_path)
+    ]).decode("utf-8").strip().split(',')[-1])
+
+    video = ffmpeg.input(str(video_path))
+    video, audio = video, video.audio
+    thread_in: subprocess.Popen = (
+        video
+        .output('pipe:', format='rawvideo', pix_fmt='rgb24')
+        .run_async(pipe_stdout=True, quiet=True)
+    )
+
+    thread_out: subprocess.Popen = (
+        ffmpeg.output(
+            ffmpeg.input('pipe:', format='rawvideo', pix_fmt='rgb24', s=f'{width}x{height}', r=framerate).video,
+            audio,
+            str(out_path),
+            pix_fmt='yuv420p'
+        )
+        .overwrite_output()
+        .run_async(pipe_stdin=True, quiet=True)
+    )
+
+    _start_time = datetime.datetime.now()
+    queue_size = args.threads
+    chunksize = 96
+
+    frame_queue = Queue(queue_size)
+
+    reader = Process(target=frame_reader, args=(thread_in, frame_queue,
+                     [height, width, 3], height * width * 3, chunksize))
+    reader.daemon = True
+    reader.start()
+    print("started reading frames")
+
+    t = tqdm(total=total_frames)
+    with Pool(args.threads) as p:
+        while True:
+            frame_chunk = frame_queue.get()
+
+            if frame_chunk is None:
+                break
+
+            for out_frame in p.imap(sorter.apply, frame_chunk):
+                # cv2.imshow('out', out_frame)
+                # cv2.waitKey(1)
+                t.update()
+                thread_out.stdin.write(
+                    out_frame.astype(np.uint8).tobytes()
+                )
+
+    duration = datetime.datetime.now() - _start_time
+    print('\n')
+    print(f"Done! it took: {duration}")
+    thread_out.stdin.close()
+    thread_in.wait()
+    thread_out.wait()
+    thread_in.communicate()
+    thread_out.communicate()
+    frame_queue.close()
+    reader.join()
+    reader.close()
+
+
 if __name__ == "__main__":
 
-    args = main_parser().parse_args()
+    args = ConfigParser(main_parser(), "config.json", autofill=True).parse_args()
 
     # Initialize the sorter manager
     sorter = SorterManager()
 
     # Add the sorter that decides how to separate the sets of pixels
-    # sorter.setDetector(Canny(args.threshold))
-    args.threshold = int(args.threshold)
-    sorter.setDetector(AbstractSorter(args.threshold))
+    detectors = {
+        'default': AbstractSorter,
+        'hue': Hue,
+        'saturation': Saturation,
+        'value': Value,
+        'lightness': Lightness,
+        'canny': Canny
+    }
+    if args.gray_img:
+        if not Path(args.gray_img).exists():
+            print("Gray image does not exist")
+            sys.exit(1)
+        gray_path = Path(args.gray_img).resolve()
+        # read the image as grayscale
+        print("Reading gray...")
+        gray_image = cv2.imread(str(gray_path))
+        if gray_image is None:
+            print("Gray image failed to load")
+            sys.exit(1)
+        sorter.setDetector(ViaImage(gray_image))
+    elif args.detector:
+        args.threshold = int(args.threshold)
+        sorter.setDetector(detectors[args.detector](args.threshold))
+
+    # sorter.setDetector(AbstractSorter(args.threshold))
 
     # Adds the sorter that changes how the sets of pixels are sorted
+    sorter.setSorter(detectors[args.sorter]())
     # sorter.setSorter(AbstractSorter())
 
-    image_list = []
-    if args.img:  # The mode is a single image
-        image = Path(args.img)
-        if not image.exists():
-            print("Image does not exist")
-            sys.exit(1)
-
-        out_path = image.with_stem(f"{image.stem}-pixelsorted")
-        img = cv2.imread(str(image))
-        pxsorted = sorter.apply_pool(img, threads=args.threads)
-        cv2.imwrite(str(out_path), pxsorted)
+    if args.img:
+        run_img(args, sorter)
 
     elif args.folder:
-        folder = Path(args.folder)
-        out_folder = folder.with_stem(f"{folder.stem}-pixelsorted")
-        image_list = get_file_list(Path(args.folder), "*.png", "*.jpg", "*.webp")
-        out_dict = {image: out_folder / image.relative_to(folder) for image in image_list}
-        if args.resume:
-            image_list = [image for image in image_list if not out_dict[image].exists()]
+        run_folder(args, sorter)
 
-        def read_and_write(path: Path):
-            # img = cv2.imread(str(path))
-            out = out_dict[path]
-            img = cv2.imread(str(path))
-            pxsorted = sorter.apply(img)
-            cv2.imwrite(str(out), pxsorted)
-
-        if not image_list:
-            print("List is empty")
-            exit()
-
-        with Pool(min(args.threads, len(image_list))) as p:
-            if not out_folder.exists():
-                out_folder.mkdir()
-            for _ in tqdm(p.imap(read_and_write, image_list), total=len(image_list)):
-                pass
-        print(f"Done! images are in {out_folder}")
+    elif args.video:
+        run_video(args, sorter)

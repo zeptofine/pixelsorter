@@ -22,7 +22,6 @@ class CfgDict(dict):
             out_dict = self
         with open(self.cfg_path, 'w+') as f:
             f.write(json.dumps(out_dict, indent=indent))
-        print("saved")
         return self
 
     def update(self, *args, **kwargs):

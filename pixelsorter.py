@@ -24,7 +24,8 @@ def main_parser() -> argparse.ArgumentParser:
     parser.add_argument("--threads", type=int, default=(os.cpu_count() / 4) * 3,
                         help="number of threads to run the images in parallel.")
     parser.add_argument("--threshold", help="Threshold for the sorter algo", default=64)
-    parser.add_argument("--resume", action="store_true", help="continues a folder render.")
+    folder_specific = parser.add_argument_group("Folder specific options")
+    folder_specific.add_argument("--resume", action="store_true", help="continues a folder render.")
     gray_modes = parser.add_mutually_exclusive_group()
     gray_modes.add_argument("--detector", choices=('default', 'hue', 'saturation', 'value', 'lightness', 'canny'),
                             help="how the script identifies sets of pixels to sort", default='default')
@@ -41,7 +42,7 @@ def get_file_list(folder: Path, *exts) -> list[Path]:
     Returns list[Path]: paths in the specified folders."""
     out = []
     for ext in exts:
-        out.extend(folder.glob(ext))
+        out.extend(folder.rglob(ext))
     return out
 
 
@@ -72,13 +73,13 @@ class AbstractSorter:
         return np.stack(new_sets)
 
     def iterate_through_row(self, row: int, pix_set_sorter=None):
-        if not self.thresh:
-            raise AttributeError("No threshold was given during initialization.")
+        self.assert_thresh()
         if not pix_set_sorter:
             pix_set_sorter = self
             gray_row = self.gray[row]
         else:
             gray_row = pix_set_sorter.gray[row]
+
         selected_row = self.img[row]
         pivot = 0
         column_sets = []
@@ -92,9 +93,13 @@ class AbstractSorter:
                                                        gray_row[pivot:]))
         return np.concatenate(column_sets, axis=0)
 
+    def assert_thresh(self):
+        if not self.thresh:
+            raise AttributeError("No threshold was given during initialization")
+
 
 class HSV(AbstractSorter):
-    def __init__(self, thresh, type: int):
+    def __init__(self, thresh: int, type: int):
         '''
         type: H,S,V = 0, 1, 2
         '''
@@ -107,17 +112,17 @@ class HSV(AbstractSorter):
 
 
 class Hue(HSV):
-    def __init__(self, thresh):
+    def __init__(self, thresh: int = None):
         super().__init__(thresh, 0)
 
 
 class Saturation(HSV):
-    def __init__(self, thresh):
+    def __init__(self, thresh: int = None):
         super().__init__(thresh, 1)
 
 
 class Value(HSV):
-    def __init__(self, thresh):
+    def __init__(self, thresh: int = None):
         super().__init__(thresh, 2)
 
 
@@ -140,13 +145,14 @@ class Canny(AbstractSorter):
                               int(self.thresh))
 
     def iterate_through_row(self, row: int, pix_set_sorter=None):
-        if not hasattr(self, 'img'):
-            raise RuntimeError("No image or diff was specified during creation")
+        self.assert_thresh()
+
         if not pix_set_sorter:
             pix_set_sorter = self
-            gray_row = self.gray[row]
-        else:
-            gray_row = pix_set_sorter.gray[row]
+            self.assert_gray()
+
+        gray_row = pix_set_sorter.gray[row]
+
         pivot = 0
         column_sets = []
         selected_row: np.ndarray = self.img[row]
@@ -162,6 +168,10 @@ class Canny(AbstractSorter):
                                                        ))
         pix_sets = np.concatenate(column_sets, axis=0)
         return pix_sets
+
+    def assert_gray(self):
+        if not self.gray:
+            raise AttributeError("Gray was not initialized")
 
 
 class ViaImage(Canny):
@@ -197,7 +207,8 @@ class SorterManager:
 
         # Make a copy of the image so the original is preserved
         # (The detector and sorter only reads the image)
-        new_img = img.copy()
+        new_img = img
+        print(new_img.shape)
 
         iterable = range(img.shape[0])
         if use_tqdm:
@@ -246,6 +257,21 @@ def check(condition, statement):
         exit(1)
 
 
+def recursive_mkdir(p: Path):
+    for parent in list(p.parents)[::-1]:
+        if not parent.exists():
+            parent.mkdir()
+
+
+def run_sorter(zipped):
+    sorter, impath, out = zipped
+    img = cv2.imread(str(impath))
+    sorted_img = sorter.apply(img)
+    recursive_mkdir(out)
+
+    cv2.imwrite(str(out), sorted_img)
+
+
 def frame_reader(in_thread: subprocess.Popen, in_queue: Queue, shape, read_size, chunksize=12):
     while True:
         frame_stack = []
@@ -279,24 +305,18 @@ def run_folder(args: argparse.Namespace, sorter: SorterManager):
     folder = Path(args.folder)
     out_folder = folder.with_stem(f"{folder.stem}-pixelsorted")
     print("getting list...")
-    image_list = get_file_list(Path(args.folder), "*.png", "*.jpg", "*.webp")
+    image_list = sorted(get_file_list(Path(args.folder), "*.png", "*.jpg", "*.webp"))
     out_dict = {image: out_folder / image.relative_to(folder) for image in image_list}
     if args.resume:
         print("Filtering existing images...")
         image_list = [image for image in image_list if not out_dict[image].exists()]
 
-    def read_and_write(path_out):
-        path, out = path_out
-        img = cv2.imread(str(path))
-        pxsorted = sorter.apply(img)
-        out.mkdir(exist_ok=True)
-        cv2.imwrite(str(out), pxsorted)
-
     check(image_list, "List is empty")
 
-    pargs = [(image, out_dict[image]) for image in image_list]
+    print("running...")
+    pargs = [(sorter, image, out_dict[image]) for image in image_list]
     with Pool(min(args.threads, len(image_list))) as p:
-        for _ in tqdm(p.imap(read_and_write, pargs), total=len(image_list)):
+        for _ in tqdm(p.imap(run_sorter, pargs), total=len(image_list)):
             pass
     print(f"Done! images are in {out_folder}")
 
@@ -355,6 +375,7 @@ def run_video(args: argparse.Namespace, sorter: SorterManager):
 
     frame_queue = Queue(queue_size)
 
+    # reads the frames coming in from the video and adds chunks of them to the frame_queue as np.ndarray's, asynchronously
     reader = Process(target=frame_reader, args=(thread_in, frame_queue,
                      [height, width, 3], height * width * 3, chunksize))
     reader.daemon = True
@@ -364,11 +385,12 @@ def run_video(args: argparse.Namespace, sorter: SorterManager):
     t = tqdm(total=total_frames)
     with Pool(args.threads) as p:
         while True:
+            # get a collection of frames
             frame_chunk = frame_queue.get()
 
             if frame_chunk is None:
                 break
-
+            # run the frames through the sorter
             for out_frame in p.imap(sorter.apply, frame_chunk):
                 # cv2.imshow('out', out_frame)
                 # cv2.waitKey(1)

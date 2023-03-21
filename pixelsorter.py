@@ -1,37 +1,60 @@
 import argparse
 import datetime
-import sys
-from multiprocessing import Pool, Process, Queue
-from pathlib import Path
+import os
 import subprocess
+# import sys
+import threading
+from multiprocessing import Pool, Queue
+from multiprocessing.queues import Full
+from pathlib import Path
+# from pprint import pprint
+from threading import Thread
 
 import cv2
+import dateutil.parser as timeparser
 import ffmpeg
 import numpy as np
+import psutil
 from tqdm import tqdm
-import os
+
 from ConfigArgParser import ConfigParser
 
 
 def main_parser() -> argparse.ArgumentParser:
+    # Top-level parser
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    modes = parser.add_mutually_exclusive_group()
-    modes.add_argument('-i', '--img', type=str, help="Input to a file to be run.")
-    modes.add_argument('--folder', type=str,
-                       help="Input to a directory of files to be run. accepts png, jpeg, webp")
-    modes.add_argument('--video', type=str,
-                       help="path to a video to convert")
+
+    # Global args
+    parser.add_argument("--threshold", help="Threshold for the sorter algo", default=64)
     parser.add_argument("--threads", type=int, default=(os.cpu_count() / 4) * 3,
                         help="number of threads to run the images in parallel.")
-    parser.add_argument("--threshold", help="Threshold for the sorter algo", default=64)
-    folder_specific = parser.add_argument_group("Folder specific options")
-    folder_specific.add_argument("--resume", action="store_true", help="continues a folder render.")
-    gray_modes = parser.add_mutually_exclusive_group()
-    gray_modes.add_argument("--detector", choices=('default', 'hue', 'saturation', 'value', 'lightness', 'canny'),
-                            help="how the script identifies sets of pixels to sort", default='default')
-    gray_modes.add_argument("--gray_img", help="Path to the image to use as a threshold.")
+    parser.add_argument("--detector", choices=('default', 'hue', 'saturation', 'value', 'lightness', 'canny'),
+                        help="how the script identifies sets of pixels to sort", default='default')
     parser.add_argument("--sorter", choices=('default', 'hue', 'saturation', 'value', 'lightness'),
                         help="how the script sorts the sets of pixels", default='default')
+
+    subparsers = parser.add_subparsers(dest="mode", help='sub-command help')
+
+    # Picture arg parser
+    parser_pic = subparsers.add_parser('image')
+    parser_pic.add_argument('-i', '--input', type=str, help="Input to a file to be run.", required=True)
+
+    # Folder arg parser
+    parser_folder = subparsers.add_parser('folder')
+    parser_folder.add_argument('-i', '--input', type=str,
+                               help="Input to a directory of files to be run. Accepts png, jpeg, webp", required=True)
+    parser_folder.add_argument("--resume", action="store_true", help="continues a folder render.")
+
+    # Video arg parser
+    parser_v = subparsers.add_parser('video')
+
+    parser_v.add_argument('-i', '--input', type=str,
+                          help="path to a video to convert", required=True)
+    parser_v.add_argument('--preview', action='store_true',
+                          help="""If activated, a cv2 window will appear to preview the images as they are written.
+                                This is useful for debugging, but adds a little bit of processsing time.""")
+    parser_v.add_argument('--gb_usage', type=float,
+                          help="Tries to cache as many frames at once that can fit in the set size.")
 
     return parser
 
@@ -69,33 +92,25 @@ class AbstractSorter:
         return f"{self.__class__.__name__}({out})"
 
     def pix_set_sort(self, pix_set, gray_set):
-        new_sets = list(zip(*sorted(zip(gray_set, pix_set), key=lambda x: x[0])))[1]
-        return np.stack(new_sets)
+        return np.stack((
+            *zip(
+                *sorted(  # sort the pix_set based on the gray_set
+                    zip(gray_set, pix_set),
+                    key=lambda x: x[0])
+            ),
+        )[1])
 
-    def iterate_through_row(self, row: int, pix_set_sorter=None):
-        self.assert_thresh()
-        if not pix_set_sorter:
-            pix_set_sorter = self
-            gray_row = self.gray[row]
-        else:
-            gray_row = pix_set_sorter.gray[row]
-
-        selected_row = self.img[row]
+    def iterate_through_row(self, row: int):
         pivot = 0
-        column_sets = []
         for col in range(1, self.img.shape[1]):
             if abs(int(self.gray[row, pivot]) - int(self.gray[row, col])) > self.thresh:
-                column_sets.append(pix_set_sorter.pix_set_sort(selected_row[pivot:col],
-                                                               gray_row[pivot:col]
-                                                               ))
+                yield (pivot, col)
                 pivot = col
-        column_sets.append(pix_set_sorter.pix_set_sort(selected_row[pivot:],
-                                                       gray_row[pivot:]))
-        return np.concatenate(column_sets, axis=0)
+        yield (pivot, self.img.shape[1])
 
-    def assert_thresh(self):
-        if not self.thresh:
-            raise AttributeError("No threshold was given during initialization")
+    def iterate_through_indices(self, row: int, indices_of_pixels: list[tuple[int, int]]) -> np.ndarray:
+        for start, end in indices_of_pixels:
+            yield self.pix_set_sort(self.img[row, start:end], self.gray[row, start:end])
 
 
 class HSV(AbstractSorter):
@@ -103,7 +118,7 @@ class HSV(AbstractSorter):
         '''
         type: H,S,V = 0, 1, 2
         '''
-        self.thresh = thresh
+        super().__init__(thresh)
         self.type = type
 
     def apply(self, img: np.ndarray):
@@ -144,39 +159,18 @@ class Canny(AbstractSorter):
                               int(self.thresh),
                               int(self.thresh))
 
-    def iterate_through_row(self, row: int, pix_set_sorter=None):
-        self.assert_thresh()
-
-        if not pix_set_sorter:
-            pix_set_sorter = self
-            self.assert_gray()
-
-        gray_row = pix_set_sorter.gray[row]
-
+    def iterate_through_row(self, row: int):
         pivot = 0
-        column_sets = []
-        selected_row: np.ndarray = self.img[row]
 
         for col in range(1, self.img.shape[1]):
             if self.gray[row, col]:
-                column_sets.append(pix_set_sorter.pix_set_sort(selected_row[pivot:col],
-                                                               gray_row[pivot:col]
-                                                               ))
+                yield (pivot, col)
                 pivot = col
-        column_sets.append(pix_set_sorter.pix_set_sort(selected_row[pivot:],
-                                                       gray_row[pivot:]
-                                                       ))
-        pix_sets = np.concatenate(column_sets, axis=0)
-        return pix_sets
-
-    def assert_gray(self):
-        if not self.gray:
-            raise AttributeError("Gray was not initialized")
+        yield (pivot, self.img.shape[1])
 
 
 class ViaImage(Canny):
     def __init__(self, gray: np.ndarray):
-        # self.gray = gray
         self.gray = cv2.cvtColor(gray, cv2.COLOR_BGR2GRAY)
 
     def apply(self, img: np.ndarray):
@@ -196,33 +190,41 @@ class SorterManager:
 
     def assert_detector(self):
         # The detector is necessary for the sorter to work, but it can be added to the
-        #   manager after initialization
+        # manager after initialization
         if not self.detector:
+            raise RuntimeError("No detector is found in manager")
+
+    def assert_sorter(self):
+        # The sorter is necessary for application, but it can be added afterwards
+        if not self.sorter:
             raise RuntimeError("No detector is found in manager")
 
     def apply(self, img: np.ndarray, use_tqdm=False):
         self.assert_detector()
+        self.assert_sorter()
 
         self.detector.apply(img)
+        if not self.detector == self.sorter:
+            self.sorter.apply(img)
 
         # Make a copy of the image so the original is preserved
         # (The detector and sorter only reads the image)
-        new_img = img
-        print(new_img.shape)
+        new_img = img.copy()
 
         iterable = range(img.shape[0])
         if use_tqdm:
             iterable = tqdm(iterable)
 
-        if self.sorter is not None:
-            self.sorter.apply(img)
         for row in iterable:
-            args = [row]
-            if self.sorter is not None:
-                args.append(self.sorter)
+            # Get the indices of pixels to sort.
+            new_img[row] = np.concatenate(
+                list(self.sorter.iterate_through_indices(
+                    row,
+                    self.detector.iterate_through_row(row)
+                )),
+                axis=0
+            )
 
-            # Run the detector on the given row
-            new_img[row] = self.detector.iterate_through_row(*args)
         return new_img
 
     def apply_pool(self, img: np.ndarray, threads=1):
@@ -238,16 +240,20 @@ class SorterManager:
 
         if self.sorter:
             self.sorter.apply(img)
-            pargs = zip(iterable, [self.sorter] * img.shape[0])
+            sorter = self.sorter
         else:
-            pargs = iterable
-        # rprint(list(pargs))
+            sorter = self.detector
 
         with Pool(threads) as p:
-            iterable = pargs
-            # out = p.starmap(self.detector.iterate_through_row, iterable)
-            for idx, new_row in enumerate(p.starmap(self.detector.iterate_through_row, iterable)):
-                new_img[idx] = new_row
+            pixel_indices = p.map_async(self.detector.iterate_through_row, iterable)
+
+            new_img = np.ndarray([
+                np.concatenate(
+                    [p.map(sorter.iterate_through_indices, (row, pixel_indices[row]))
+                        for row in iterable],
+                    axis=0
+                )
+            ])
         return new_img
 
 
@@ -272,24 +278,31 @@ def run_sorter(zipped):
     cv2.imwrite(str(out), sorted_img)
 
 
-def frame_reader(in_thread: subprocess.Popen, in_queue: Queue, shape, read_size, chunksize=12):
-    while True:
-        frame_stack = []
-        for _ in range(chunksize):
+def read_frames(continue_event: threading.Event, in_thread: subprocess.Popen, in_queue: Queue, shape, read_size, chunksize=12):
+    print("started reading frames")
+    frame_stack = []
+    while continue_event.is_set():
+        for _ in range(chunksize - len(frame_stack)):
             in_bytes = in_thread.stdout.read(read_size)
             if not in_bytes:
                 break
             frame_stack.append(np.frombuffer(in_bytes, np.uint8).reshape(shape))
+        if frame_stack:
+            try:
+                in_queue.put(frame_stack, timeout=2)
 
-        if not frame_stack:
+            except Full:
+                # print("Images have taken 30 extra seconds to add to the queue")
+                continue
+            frame_stack = []
+        else:
             in_queue.put(None)
+            print("finished reading frames")
             break
-
-        in_queue.put(frame_stack)
 
 
 def run_img(args: argparse.Namespace, sorter: SorterManager):
-    image = Path(args.img)
+    image = Path(args.input)
     check(image.exists(), "Image does not exist")
 
     out_path = image.with_stem(f"{image.stem}-pixelsorted")
@@ -302,13 +315,14 @@ def run_img(args: argparse.Namespace, sorter: SorterManager):
 
 
 def run_folder(args: argparse.Namespace, sorter: SorterManager):
-    folder = Path(args.folder)
+    folder = Path(args.input)
     out_folder = folder.with_stem(f"{folder.stem}-pixelsorted")
     print("getting list...")
-    image_list = sorted(get_file_list(Path(args.folder), "*.png", "*.jpg", "*.webp"))
+    image_list = sorted(get_file_list(Path(args.input), "*.png", "*.jpg", "*.webp"))
+
     out_dict = {image: out_folder / image.relative_to(folder) for image in image_list}
     if args.resume:
-        print("Filtering existing images...")
+        print("filtering existing images...")
         image_list = [image for image in image_list if not out_dict[image].exists()]
 
     check(image_list, "List is empty")
@@ -322,13 +336,14 @@ def run_folder(args: argparse.Namespace, sorter: SorterManager):
 
 
 def run_video(args: argparse.Namespace, sorter: SorterManager):
-    video_path = Path(args.video)
+    # print(args)
+    video_path = Path(args.input)
     out_path = video_path.with_stem(f"{video_path.stem}-pixelsorted")
     check(video_path.exists(), "Video path does not exist")
 
     # get video info
     print("getting video info")
-    probe = ffmpeg.probe(args.video)
+    probe = ffmpeg.probe(args.input)
     video_streams = [stream for stream in probe['streams'] if stream['codec_type'] == 'video']
     # check(video_streams, "Video streams are empty")
     video_stream = video_streams[0]
@@ -341,85 +356,129 @@ def run_video(args: argparse.Namespace, sorter: SorterManager):
     framerate = int(framerate[0]) / int(framerate[1])
 
     # get total frame count
-    # TODO: Find a faster way to get the total number of frames from the video
-    # ffprobe -v error -select_streams v:0 -count_frames -show_entries stream=nb_read_frames -print_format csv <file_path>
-    total_frames = int(subprocess.check_output([
-        "ffprobe", "-v", "error",
-        "-select_streams", "v:0",
-        "-count_frames", "-show_entries", "stream=nb_read_frames",
-        "-print_format", "csv", str(video_path)
-    ]).decode("utf-8").strip().split(',')[-1])
+    duration = timeparser.parse(video_stream['tags']['DURATION']).time()
+    t = datetime.datetime.combine(datetime.date.min, duration) - datetime.datetime.min
+    total_frames = int(t.total_seconds() * framerate)
 
     video = ffmpeg.input(str(video_path))
     video, audio = video, video.audio
+
     thread_in: subprocess.Popen = (
         video
         .output('pipe:', format='rawvideo', pix_fmt='rgb24')
-        .run_async(pipe_stdout=True, quiet=True)
+        .run_async(
+            pipe_stdout=True,
+            quiet=True
+        )
     )
 
     thread_out: subprocess.Popen = (
-        ffmpeg.output(
-            ffmpeg.input('pipe:', format='rawvideo', pix_fmt='rgb24', s=f'{width}x{height}', r=framerate).video,
+        ffmpeg
+        .output(
+            ffmpeg.input(
+                'pipe:',
+                format='rawvideo',
+                pix_fmt='rgb24',
+                s=f'{width}x{height}',
+                r=framerate,
+            ).video,
             audio,
             str(out_path),
-            pix_fmt='yuv420p'
+            pix_fmt='yuv420p',
+
+        )
+        # I wish i could just use quiet=True in .run_async(), but for some reason if I do, the pool
+        # consistently stops 5 mins into processing
+        .global_args(
+            '-hide_banner',
+            '-nostats',
+            '-loglevel', 'error'
         )
         .overwrite_output()
-        .run_async(pipe_stdin=True, quiet=True)
+        .run_async(
+            pipe_stdin=True,
+        )
     )
 
     _start_time = datetime.datetime.now()
-    queue_size = args.threads
-    chunksize = 96
+
+    # the number of bytes to read per image
+    read_size = height * width * 3
+    # the number of frames to read in one chunk
+    frame_chunk_size = args.threads * 2
+    gb_usage = args.gb_usage
+    gb_usage_in_bytes = gb_usage * (10**9)
+
+    # Example:
+    # Free memory before: 18.58
+    # Free memory after: -5.45
+    # Chosen memory usage is too large, resizing for a minimum of 1 gb free
+    # Free memory after: 1.58
+
+    # get amount of system memory
+    virtual_memory = psutil.virtual_memory()
+
+    print(f'free memory before: {virtual_memory.available / (10 ** 9):.2f} GB')
+    print(f'free memory with predicted usage: {(virtual_memory.available - gb_usage_in_bytes) / (10 ** 9):.2f} GB')
+    if virtual_memory.available - gb_usage_in_bytes < 10 ** 9:
+        print("chosen memory usage is too large, resizing for a minimum of 1 gb free")
+
+        while virtual_memory.available - gb_usage_in_bytes < 10 ** 9:
+            gb_usage_in_bytes -= (10 ** 9)
+        print(f"using {gb_usage_in_bytes // (10 ** 9)} GB")
+
+    # calculate how many images can fit in a given amount of memory
+    queue_size = int(gb_usage_in_bytes // read_size // frame_chunk_size)
 
     frame_queue = Queue(queue_size)
-
-    # reads the frames coming in from the video and adds chunks of them to the frame_queue as np.ndarray's, asynchronously
-    reader = Process(target=frame_reader, args=(thread_in, frame_queue,
-                     [height, width, 3], height * width * 3, chunksize))
+    # reads the frames coming in from the video and adds list[np.ndarray]'s to frame_queue asynchronously
+    continue_event = threading.Event()
+    continue_event.set()
+    reader = Thread(target=read_frames, args=(continue_event, thread_in, frame_queue,
+                                              [height, width, 3], read_size, frame_chunk_size))
     reader.daemon = True
     reader.start()
-    print("started reading frames")
-
     t = tqdm(total=total_frames)
-    with Pool(args.threads) as p:
-        while True:
-            # get a collection of frames
-            frame_chunk = frame_queue.get()
+    p = Pool(args.threads)
+    while True:
+        # get a collection of frames
+        chunk_of_frames = frame_queue.get()
+        if chunk_of_frames is None:
+            break
 
-            if frame_chunk is None:
-                break
-            # run the frames through the sorter
-            for out_frame in p.imap(sorter.apply, frame_chunk):
-                # cv2.imshow('out', out_frame)
-                # cv2.waitKey(1)
-                t.update()
-                thread_out.stdin.write(
-                    out_frame.astype(np.uint8).tobytes()
-                )
+        # run the frames through the sorter
+        for out_frame in p.imap(sorter.apply, chunk_of_frames):
+            t.update()
+            thread_out.stdin.write(
+                out_frame.tobytes()
+            )
+            if args.preview:
+                cv2.imshow('out', cv2.cvtColor(out_frame, cv2.COLOR_RGB2BGR))
+                cv2.waitKey(1)
+    p.terminate()
+    p.join()
 
+    continue_event.clear()
     duration = datetime.datetime.now() - _start_time
     print('\n')
     print(f"Done! it took: {duration}")
+    thread_in.stdout.close()
     thread_out.stdin.close()
-    thread_in.wait()
-    thread_out.wait()
-    thread_in.communicate()
-    thread_out.communicate()
     frame_queue.close()
     reader.join()
-    reader.close()
 
 
 if __name__ == "__main__":
 
-    args = ConfigParser(main_parser(), "config.json", autofill=True).parse_args()
+    parser = main_parser()
+    args = ConfigParser(
+        parser,
+        "config.json"
+    ).parse_args()
 
     # Initialize the sorter manager
     sorter = SorterManager()
 
-    # Add the sorter that decides how to separate the sets of pixels
     detectors = {
         'default': AbstractSorter,
         'hue': Hue,
@@ -428,33 +487,21 @@ if __name__ == "__main__":
         'lightness': Lightness,
         'canny': Canny
     }
-    if args.gray_img:
-        if not Path(args.gray_img).exists():
-            print("Gray image does not exist")
-            sys.exit(1)
-        gray_path = Path(args.gray_img).resolve()
-        # read the image as grayscale
-        print("Reading gray...")
-        gray_image = cv2.imread(str(gray_path))
-        if gray_image is None:
-            print("Gray image failed to load")
-            sys.exit(1)
-        sorter.setDetector(ViaImage(gray_image))
-    elif args.detector:
-        args.threshold = int(args.threshold)
-        sorter.setDetector(detectors[args.detector](args.threshold))
 
-    # sorter.setDetector(AbstractSorter(args.threshold))
+    args.threshold = int(args.threshold)
+
+    # Add the sorter that decides how to separate the sets of pixels
+    sorter.setDetector(detectors[args.detector](args.threshold))
 
     # Adds the sorter that changes how the sets of pixels are sorted
     sorter.setSorter(detectors[args.sorter]())
-    # sorter.setSorter(AbstractSorter())
 
-    if args.img:
-        run_img(args, sorter)
-
-    elif args.folder:
-        run_folder(args, sorter)
-
-    elif args.video:
-        run_video(args, sorter)
+    modes = {
+        'image': run_img,
+        'folder': run_folder,
+        'video': run_video
+    }
+    if args.mode and args.mode in modes:
+        modes[args.mode](args, sorter)
+    else:
+        print("No mode was selected")

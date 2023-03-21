@@ -55,14 +55,17 @@ class ConfigParser:
     It saves given args to a path, and returns them when args are parsed again.'''
 
     def __init__(self, parser: ArgumentParser,
-                 config_path, cfgObject: CfgDict = None, autofill: bool = False, exit_on_change: bool = False, rewrite_help: bool = True) -> None:
-        '''
-        parser: argparse function.
-        config_path: a path to the supposed json file
-        autofill: when creating the json, fill it with the initial default values.
+                 config_path, cfgObject: CfgDict = None, autofill: bool = False, exit_on_change: bool = False):
+        '''An argparse config utility made to wrap an ArgumentParser
+
+        Parameters:
+        parser: argparse.ArgumentParser -- argparse function.
+        config_path: str -- a path to the supposed json file
+        autofill: bool -- when creating the json, fill it with the initial default values.
         Otherwise, it will only contain edited defaults.
-        exit_on_change: when commands set and reset are passed, exit once finished.
-        rewrite_help: remove and readd help argument to properly write defaults.
+        exit_on_change: bool -- when commands set and reset are passed, exit once finished.
+
+
         '''
 
         # parent parser
@@ -70,7 +73,6 @@ class ConfigParser:
         self.config_path = config_path
         self.default_prefix = '-' if '-' in self._parent.prefix_chars else self._parent.prefix_chars[0]
         self.exit_on_change = exit_on_change
-        self.rewrite_help = rewrite_help
         self.autofill = autofill
         self.file = cfgObject or CfgDict(config_path)
         # self._remove_help()
@@ -121,7 +123,7 @@ class ConfigParser:
         self.parser.set_defaults(**self.file)
 
     def parse_args(self, **kwargs) -> Namespace:
-        '''args.set, reset, reset_all logic '''
+        '''args.set, reset, reset_all logic'''
 
         # Disable every required item so if it was set in the config, it isn't required to add again
         required = {}
@@ -133,6 +135,7 @@ class ConfigParser:
 
         self.parsed_args, _ = self.parser.parse_known_args(**kwargs)
 
+        # TODO: make set, reset, and reset_all work for subparsers
         # set defaults
         if self.parsed_args.set or self.parsed_args.reset or self.parsed_args.reset_all:
             if self.parsed_args.set:
@@ -148,7 +151,7 @@ class ConfigParser:
                     self.file.pop(arg, None)
             elif self.parsed_args.reset_all:
                 self.file.clear()
-            self.file.save()
+            self.file.save().load()
 
             self.parser.set_defaults(**self.file)
 
@@ -164,7 +167,7 @@ class ConfigParser:
 
         return self.parser.parse_args()
 
-    def _convert_type(self, potential_args: list):
+    def _convert_type(self, potential_args: list) -> list:
         arg_replacements = {"true": True, "false": False,
                             "none": None, "null": None}
         potential_args[1] = arg_replacements.get(

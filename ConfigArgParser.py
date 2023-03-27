@@ -175,6 +175,17 @@ class ParserTree(dict):
     #         return self.subparsers[key[0]][key[1:]]
 
 
+def update_from_flattened(original, flattened):
+    for key, value in flattened.items():
+        if '.' in key:
+            key, future = key.split('.', 1)
+            if key not in original:
+                original[key] = {}
+            update_from_flattened(original[key], {future: value})
+        else:
+            original[key] = value
+
+
 class ConfigParser:
     '''Creates an easy argparse config utility.
     It saves given args to a path, and returns them when args are parsed again.'''
@@ -269,7 +280,8 @@ class ConfigParser:
                 potential_args = self._convert_type(potential_args)
                 if not potential_args[0] in self.kwargs:
                     sys_exit("Given key not found")
-                ParserTree.update_from_flattened_recurs(self.file, {potential_args[0]: potential_args[1]})
+
+                update_from_flattened(self.file, {potential_args[0]: potential_args[1]})
 
             elif self.parsed_args.reset:
                 for arg in self.parsed_args.reset:

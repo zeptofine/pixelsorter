@@ -4,7 +4,7 @@ import os
 import subprocess
 # import sys
 import threading
-from multiprocessing import Pool, Queue
+from multiprocessing import Pool, Queue, Process
 from multiprocessing.queues import Full
 from pathlib import Path
 # from pprint import pprint
@@ -235,35 +235,6 @@ class SorterManager:
 
         return new_img
 
-    def apply_pool(self, img: np.ndarray, threads=1):
-        self.assert_detector()
-
-        self.detector.apply(img)
-
-        # Make a copy of the image so the original is preserved
-        # (The detector and sorter only reads the image)
-        new_img = img.copy()
-
-        iterable = range(img.shape[0])
-
-        if self.sorter:
-            self.sorter.apply(img)
-            sorter = self.sorter
-        else:
-            sorter = self.detector
-
-        with Pool(threads) as p:
-            pixel_indices = p.map_async(self.detector.iterate_through_row, iterable)
-
-            new_img = np.ndarray([
-                np.concatenate(
-                    [p.map(sorter.iterate_through_indices, (row, pixel_indices[row]))
-                        for row in iterable],
-                    axis=0
-                )
-            ])
-        return new_img
-
 
 def check(condition, statement):
     if not condition:
@@ -459,38 +430,44 @@ def run_video(args: argparse.Namespace, sorter: SorterManager):
     # reads the frames coming in from the video and adds list[np.ndarray]'s to frame_queue asynchronously
     continue_event = threading.Event()
     continue_event.set()
-    reader = Thread(target=read_frames, args=(continue_event, thread_in, frame_queue,
-                                              [height, width, 3], read_size, frame_chunk_size))
+    reader = Process(target=read_frames, args=(continue_event, thread_in, frame_queue,
+                                               [height, width, 3], read_size, frame_chunk_size))
     reader.daemon = True
     reader.start()
     t = tqdm(total=total_frames)
     p = Pool(args.threads)
-    while True:
-        # get a collection of frames
-        chunk_of_frames = frame_queue.get()
-        if chunk_of_frames is None:
-            break
+    try:
+        while True:
+            # get a collection of frames
+            chunk_of_frames = frame_queue.get()
+            if chunk_of_frames is None:
+                break
 
-        # run the frames through the sorter
-        for out_frame in p.imap(sorter.apply, chunk_of_frames):
-            t.update()
-            thread_out.stdin.write(
-                cv2.cvtColor(out_frame, cv2.COLOR_BGR2RGB).tobytes()
-            )
-            if args.preview:
-                cv2.imshow('out', out_frame)
-                cv2.waitKey(1)
+            # run the frames through the sorter
+            for out_frame in p.imap(sorter.apply, chunk_of_frames):
+                t.update()
+                thread_out.stdin.write(
+                    cv2.cvtColor(out_frame, cv2.COLOR_BGR2RGB).tobytes()
+                )
+                if args.preview:
+                    cv2.imshow('out', out_frame)
+                    cv2.waitKey(1)
+    except KeyboardInterrupt:
+        reader.terminate()
+        reader.join()
+        thread_out.terminate()
     p.terminate()
     p.join()
 
     continue_event.clear()
-    duration = datetime.datetime.now() - _start_time
-    print('\n')
-    print(f"Done! it took: {duration}")
     thread_in.stdout.close()
     thread_out.stdin.close()
     frame_queue.close()
     reader.join()
+
+    duration = datetime.datetime.now() - _start_time
+    print('\n')
+    print(f"Done! it took: {duration}")
 
 
 if __name__ == "__main__":

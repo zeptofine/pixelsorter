@@ -23,9 +23,8 @@ from ConfigArgParser import ConfigParser
 def main_parser() -> argparse.ArgumentParser:
     # Top-level parser
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-
     # Global args
-    parser.add_argument("--threshold", help="Threshold for the sorter algo", default=64)
+    parser.add_argument("--threshold", type=float, help="Threshold for the sorter algo", required=True)
     parser.add_argument("--threads", type=int, default=(os.cpu_count() / 4) * 3,
                         help="number of threads to run the images in parallel.")
     parser.add_argument("--detector", choices=('default', 'hue', 'saturation', 'value', 'lightness', 'canny'),
@@ -33,8 +32,7 @@ def main_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sorter", choices=('default', 'hue', 'saturation', 'value', 'lightness'),
                         help="how the script sorts the sets of pixels", default='default')
 
-    subparsers = parser.add_subparsers(dest="mode", help='sub-command help')
-
+    subparsers = parser.add_subparsers(title="mode", dest="mode", help='sub-command help')
     # Picture arg parser
     parser_pic = subparsers.add_parser('image')
     parser_pic.add_argument('-i', '--input', type=str, help="Input to a file to be run.", required=True)
@@ -52,9 +50,19 @@ def main_parser() -> argparse.ArgumentParser:
                           help="path to a video to convert", required=True)
     parser_v.add_argument('--preview', action='store_true',
                           help="""If activated, a cv2 window will appear to preview the images as they are written.
-                                This is useful for debugging, but adds a little bit of processsing time.""")
-    parser_v.add_argument('--gb_usage', type=float,
+This is useful for debugging, but adds a little bit of processsing time.""")
+    parser_v.add_argument('--gb_usage', type=float, default=4,
                           help="Tries to cache as many frames at once that can fit in the set size.")
+    parser_v.add_argument('--chunk_size', type=int,
+                          help="""
+                          number of frames to be rendered in a single pool run.
+                          this should be at least the number of threads in order to utilize them fully
+                          """)
+    parser_v.add_argument('--to', type=int,
+                          help='the max time to render. like only render the first 10 seconds of the video.')
+    # v = parser_v.add_subparsers()
+    # vv = v.add_parser("excuse_me")
+    # vv.add_argument("--thats_incredible")
 
     return parser
 
@@ -286,7 +294,9 @@ def read_frames(continue_event: threading.Event, in_thread: subprocess.Popen, in
             in_bytes = in_thread.stdout.read(read_size)
             if not in_bytes:
                 break
-            frame_stack.append(np.frombuffer(in_bytes, np.uint8).reshape(shape))
+            image = np.frombuffer(in_bytes, np.uint8).reshape(shape)
+            image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+            frame_stack.append(image)
         if frame_stack:
             try:
                 in_queue.put(frame_stack, timeout=2)
@@ -336,7 +346,7 @@ def run_folder(args: argparse.Namespace, sorter: SorterManager):
 
 
 def run_video(args: argparse.Namespace, sorter: SorterManager):
-    # print(args)
+    check(hasattr(args, 'input'), 'No input was specified')
     video_path = Path(args.input)
     out_path = video_path.with_stem(f"{video_path.stem}-pixelsorted")
     check(video_path.exists(), "Video path does not exist")
@@ -405,27 +415,42 @@ def run_video(args: argparse.Namespace, sorter: SorterManager):
     # the number of bytes to read per image
     read_size = height * width * 3
     # the number of frames to read in one chunk
-    frame_chunk_size = args.threads * 2
+
+    if not args.chunk_size:
+        frame_chunk_size = args.threads * 2
+    else:
+        frame_chunk_size = args.chunk_size
     gb_usage = args.gb_usage
-    gb_usage_in_bytes = gb_usage * (10**9)
+    gb_usage_in_bytes = int(gb_usage * (10**9))
 
     # Example:
-    # Free memory before: 18.58
-    # Free memory after: -5.45
+    # free memory before: 18.58 GB
+    # free memory with predicted given usage: -5.45 GB
     # Chosen memory usage is too large, resizing for a minimum of 1 gb free
-    # Free memory after: 1.58
+    # using 1.58 GB
+    # estimaged total usage is less than gb usage. Video will likely fit in less space than specified
+    # free with predicted total usage: 12.69 GB
 
     # get amount of system memory
     virtual_memory = psutil.virtual_memory()
 
     print(f'free memory before: {virtual_memory.available / (10 ** 9):.2f} GB')
-    print(f'free memory with predicted usage: {(virtual_memory.available - gb_usage_in_bytes) / (10 ** 9):.2f} GB')
+    print(
+        f'free memory with predicted given usage: {(virtual_memory.available - gb_usage_in_bytes) / (10 ** 9):.2f} GB')
     if virtual_memory.available - gb_usage_in_bytes < 10 ** 9:
-        print("chosen memory usage is too large, resizing for a minimum of 1 gb free")
+        print("Chosen memory usage is too large, resizing for a minimum of 1 gb free")
 
         while virtual_memory.available - gb_usage_in_bytes < 10 ** 9:
             gb_usage_in_bytes -= (10 ** 9)
-        print(f"using {gb_usage_in_bytes // (10 ** 9)} GB")
+        print(f"using {gb_usage_in_bytes // (10 ** 9):.2f} GB")
+
+    # estimate the total number of bytes in the video
+    total_usage = read_size * total_frames
+
+    # if the total number of bytes in the video is smaller than the allowed ram threshold
+    if total_usage < gb_usage_in_bytes:
+        print("estimaged total usage is less than given usage. Video will likely fit in less space than specified")
+        print(f'free memory with predicted total usage: {(virtual_memory.available - total_usage) / (10 ** 9):.2f} GB')
 
     # calculate how many images can fit in a given amount of memory
     queue_size = int(gb_usage_in_bytes // read_size // frame_chunk_size)
@@ -450,10 +475,10 @@ def run_video(args: argparse.Namespace, sorter: SorterManager):
         for out_frame in p.imap(sorter.apply, chunk_of_frames):
             t.update()
             thread_out.stdin.write(
-                out_frame.tobytes()
+                cv2.cvtColor(out_frame, cv2.COLOR_BGR2RGB).tobytes()
             )
             if args.preview:
-                cv2.imshow('out', cv2.cvtColor(out_frame, cv2.COLOR_RGB2BGR))
+                cv2.imshow('out', out_frame)
                 cv2.waitKey(1)
     p.terminate()
     p.join()

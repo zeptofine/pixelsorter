@@ -1,5 +1,8 @@
-opencv-python
-numpy
-tqdm
+autopep8
 ffmpeg-python
+numpy
+opencv-python
+orjson
 psutil
+python-dateutil
+tqdm

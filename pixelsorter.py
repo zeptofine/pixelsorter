@@ -7,15 +7,13 @@ import threading
 from multiprocessing import Pool, Queue, Process
 from multiprocessing.queues import Full
 from pathlib import Path
-# from pprint import pprint
-from threading import Thread
-
 import cv2
 import dateutil.parser as timeparser
 import ffmpeg
 import numpy as np
 import psutil
 from tqdm import tqdm
+# from pprint import pprint
 
 from ConfigArgParser import ConfigParser
 
@@ -32,19 +30,20 @@ def main_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sorter", choices=('default', 'hue', 'saturation', 'value', 'lightness'),
                         help="how the script sorts the sets of pixels", default='default')
 
-    subparsers = parser.add_subparsers(title="mode", dest="mode", help='sub-command help')
+    subparsers = parser.add_subparsers(title="mode MODE", dest="mode",
+                                       help='sub-command help. use --set mode MODE to set a default.')
     # Picture arg parser
-    parser_pic = subparsers.add_parser('image')
+    parser_pic = subparsers.add_parser('image', formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser_pic.add_argument('-i', '--input', type=str, help="Input to a file to be run.", required=True)
 
     # Folder arg parser
-    parser_folder = subparsers.add_parser('folder')
+    parser_folder = subparsers.add_parser('folder', formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser_folder.add_argument('-i', '--input', type=str,
                                help="Input to a directory of files to be run. Accepts png, jpeg, webp", required=True)
     parser_folder.add_argument("--resume", action="store_true", help="continues a folder render.")
 
     # Video arg parser
-    parser_v = subparsers.add_parser('video')
+    parser_v = subparsers.add_parser('video', formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 
     parser_v.add_argument('-i', '--input', type=str,
                           help="path to a video to convert", required=True)
@@ -58,8 +57,6 @@ This is useful for debugging, but adds a little bit of processsing time.""")
                           number of frames to be rendered in a single pool run.
                           this should be at least the number of threads in order to utilize them fully
                           """)
-    parser_v.add_argument('--to', type=int,
-                          help='the max time to render. like only render the first 10 seconds of the video.')
     # v = parser_v.add_subparsers()
     # vv = v.add_parser("excuse_me")
     # vv.add_argument("--thats_incredible")
@@ -82,8 +79,7 @@ class AbstractSorter:
         self.set_thresh(thresh)
 
     def apply(self, img: np.ndarray):
-        self.img = img
-        self.gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        self.img = np.dstack((img, cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)))
 
     def set_thresh(self, thresh):
         self.thresh = thresh
@@ -99,26 +95,25 @@ class AbstractSorter:
         out = ", ".join(attrlist)
         return f"{self.__class__.__name__}({out})"
 
-    def pix_set_sort(self, pix_set, gray_set):
-        return np.stack((
-            *zip(
-                *sorted(  # sort the pix_set based on the gray_set
-                    zip(gray_set, pix_set),
-                    key=lambda x: x[0])
-            ),
-        )[1])
+    def pix_set_sort(self, row, start, end):
+        return np.stack(sorted(self.img[row, start:end],
+                               key=lambda line: line[-1]))[:, :-1]
 
-    def iterate_through_row(self, row: int):
+    def get_indices(self, row: int):
         pivot = 0
         for col in range(1, self.img.shape[1]):
-            if abs(int(self.gray[row, pivot]) - int(self.gray[row, col])) > self.thresh:
-                yield (pivot, col)
+            if abs(int(self.img[row, pivot, -1] - int(self.img[row, col, -1]))) > self.thresh:
+                yield col
                 pivot = col
-        yield (pivot, self.img.shape[1])
+        yield self.img.shape[1]
 
-    def iterate_through_indices(self, row: int, indices_of_pixels: list[tuple[int, int]]) -> np.ndarray:
-        for start, end in indices_of_pixels:
-            yield self.pix_set_sort(self.img[row, start:end], self.gray[row, start:end])
+    def sort_indices(self, row: int, indices) -> np.ndarray:
+        pivot = 0
+        lst = []
+        for col in indices:
+            lst.append(self.pix_set_sort(row, pivot, col))
+            pivot = col
+        return np.concatenate(lst, axis=0)
 
 
 class HSV(AbstractSorter):
@@ -130,8 +125,10 @@ class HSV(AbstractSorter):
         self.type = type
 
     def apply(self, img: np.ndarray):
-        self.img = img
-        self.gray = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)[:, :, self.type]
+        self.img = np.dstack((
+            img,
+            cv2.cvtColor(img, cv2.COLOR_BGR2HSV)[:, :, self.type]
+        ))
 
 
 class Hue(HSV):
@@ -151,8 +148,10 @@ class Value(HSV):
 
 class Lightness(AbstractSorter):
     def apply(self, img: np.ndarray):
-        self.img = img
-        self.gray = cv2.cvtColor(img, cv2.COLOR_BGR2HLS)[:, :, 2]
+        self.img = np.dstack((
+            img,
+            cv2.cvtColor(img, cv2.COLOR_BGR2HLS)[:, :, 1]
+        ))
 
 
 class Canny(AbstractSorter):
@@ -162,19 +161,16 @@ class Canny(AbstractSorter):
         self.sigma = sigma
 
     def apply(self, img: np.ndarray):
-        self.img = img
-        self.gray = cv2.Canny(cv2.GaussianBlur(img, self.blur_size, self.sigma),
-                              int(self.thresh),
-                              int(self.thresh))
+        self.img = np.dstack((img,
+                              cv2.Canny(cv2.GaussianBlur(img, self.blur_size, self.sigma),
+                                        int(self.thresh),
+                                        int(self.thresh))))
 
-    def iterate_through_row(self, row: int):
-        pivot = 0
-
+    def get_indices(self, row: int):
         for col in range(1, self.img.shape[1]):
-            if self.gray[row, col]:
-                yield (pivot, col)
-                pivot = col
-        yield (pivot, self.img.shape[1])
+            if self.img[row, col, -1]:
+                yield col
+        yield self.img.shape[1]
 
 
 class ViaImage(Canny):
@@ -182,7 +178,7 @@ class ViaImage(Canny):
         self.gray = cv2.cvtColor(gray, cv2.COLOR_BGR2GRAY)
 
     def apply(self, img: np.ndarray):
-        self.img = img
+        self.img = np.dstack((img, cv2.cvtColor(img, self.gray)))
 
 
 class SorterManager:
@@ -196,20 +192,7 @@ class SorterManager:
     def setSorter(self, sorter):
         self.sorter: AbstractSorter = sorter
 
-    def assert_detector(self):
-        # The detector is necessary for the sorter to work, but it can be added to the
-        # manager after initialization
-        if not self.detector:
-            raise RuntimeError("No detector is found in manager")
-
-    def assert_sorter(self):
-        # The sorter is necessary for application, but it can be added afterwards
-        if not self.sorter:
-            raise RuntimeError("No detector is found in manager")
-
     def apply(self, img: np.ndarray, use_tqdm=False):
-        self.assert_detector()
-        self.assert_sorter()
 
         self.detector.apply(img)
         if not self.detector == self.sorter:
@@ -218,6 +201,7 @@ class SorterManager:
         # Make a copy of the image so the original is preserved
         # (The detector and sorter only reads the image)
         new_img = img.copy()
+        # new_img = img
 
         iterable = range(img.shape[0])
         if use_tqdm:
@@ -225,21 +209,10 @@ class SorterManager:
 
         for row in iterable:
             # Get the indices of pixels to sort.
-            new_img[row] = np.concatenate(
-                list(self.sorter.iterate_through_indices(
-                    row,
-                    self.detector.iterate_through_row(row)
-                )),
-                axis=0
-            )
+            # self.detector.iterate_through_row(row)
+            new_img[row] = self.sorter.sort_indices(row, self.detector.get_indices(row))
 
         return new_img
-
-
-def check(condition, statement):
-    if not condition:
-        print(statement)
-        exit(1)
 
 
 def recursive_mkdir(p: Path):
@@ -252,9 +225,10 @@ def run_sorter(zipped):
     sorter, impath, out = zipped
     img = cv2.imread(str(impath))
     sorted_img = sorter.apply(img)
-    recursive_mkdir(out)
 
+    recursive_mkdir(out)
     cv2.imwrite(str(out), sorted_img)
+    return sorted_img
 
 
 def read_frames(continue_event: threading.Event, in_thread: subprocess.Popen, in_queue: Queue, shape, read_size, chunksize=12):
@@ -280,6 +254,14 @@ def read_frames(continue_event: threading.Event, in_thread: subprocess.Popen, in
             in_queue.put(None)
             print("finished reading frames")
             break
+    if not continue_event.is_set():
+        print("Continue event has ended")
+
+
+def check(condition, statement):
+    if not condition:
+        print(statement)
+        exit(1)
 
 
 def run_img(args: argparse.Namespace, sorter: SorterManager):
@@ -298,10 +280,12 @@ def run_img(args: argparse.Namespace, sorter: SorterManager):
 def run_folder(args: argparse.Namespace, sorter: SorterManager):
     folder = Path(args.input)
     out_folder = folder.with_stem(f"{folder.stem}-pixelsorted")
+
     print("getting list...")
-    image_list = sorted(get_file_list(Path(args.input), "*.png", "*.jpg", "*.webp"))
+    image_list = get_file_list(Path(args.input), "*.png", "*.jpg", "*.webp")
 
     out_dict = {image: out_folder / image.relative_to(folder) for image in image_list}
+
     if args.resume:
         print("filtering existing images...")
         image_list = [image for image in image_list if not out_dict[image].exists()]
@@ -309,10 +293,14 @@ def run_folder(args: argparse.Namespace, sorter: SorterManager):
     check(image_list, "List is empty")
 
     print("running...")
+
     pargs = [(sorter, image, out_dict[image]) for image in image_list]
     with Pool(min(args.threads, len(image_list))) as p:
-        for _ in tqdm(p.imap(run_sorter, pargs), total=len(image_list)):
+        for img in tqdm(p.imap(run_sorter, pargs), total=len(image_list)):
+            cv2.imshow('out', img)
+            cv2.waitKey(1)
             pass
+
     print(f"Done! images are in {out_folder}")
 
 
@@ -325,9 +313,7 @@ def run_video(args: argparse.Namespace, sorter: SorterManager):
     # get video info
     print("getting video info")
     probe = ffmpeg.probe(args.input)
-    video_streams = [stream for stream in probe['streams'] if stream['codec_type'] == 'video']
-    # check(video_streams, "Video streams are empty")
-    video_stream = video_streams[0]
+    video_stream = [stream for stream in probe['streams'] if stream['codec_type'] == 'video'][0]
     width = int(video_stream['width'])
     height = int(video_stream['height'])
 
@@ -354,8 +340,7 @@ def run_video(args: argparse.Namespace, sorter: SorterManager):
     )
 
     thread_out: subprocess.Popen = (
-        ffmpeg
-        .output(
+        ffmpeg.output(
             ffmpeg.input(
                 'pipe:',
                 format='rawvideo',
@@ -366,7 +351,6 @@ def run_video(args: argparse.Namespace, sorter: SorterManager):
             audio,
             str(out_path),
             pix_fmt='yuv420p',
-
         )
         # I wish i could just use quiet=True in .run_async(), but for some reason if I do, the pool
         # consistently stops 5 mins into processing
@@ -452,6 +436,7 @@ def run_video(args: argparse.Namespace, sorter: SorterManager):
                 if args.preview:
                     cv2.imshow('out', out_frame)
                     cv2.waitKey(1)
+
     except KeyboardInterrupt:
         reader.terminate()
         reader.join()

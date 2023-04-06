@@ -1,6 +1,7 @@
 # import argparse
-import json
+import orjson
 import os
+import argparse
 from argparse import ArgumentParser, Namespace
 # from pprint import pprint
 from sys import exit as sys_exit
@@ -24,7 +25,7 @@ class CfgDict(dict):
         if not isinstance(out_dict, dict):
             out_dict = self
         with open(self.cfg_path, 'w+') as f:
-            f.write(json.dumps(out_dict, indent=indent))
+            f.write(orjson.dumps(out_dict, indent=indent))
         return self
 
     def update(self, *args, **kwargs):
@@ -44,9 +45,9 @@ class CfgDict(dict):
             with open(self.cfg_path, 'r', encoding='utf-8') as config_file:
                 data = config_file.read()
                 try:
-                    self.update(json.loads(data))
-                except (json.decoder.JSONDecodeError, TypeError):
-                    print(f'[!] failed to load config.json from {self.cfg_path}')
+                    self.update(orjson.loads(data))
+                except (orjson.decoder.JSONDecodeError, TypeError):
+                    print(f'[!] failed to load config.orjson from {self.cfg_path}')
         else:
             self.save({})
         return self
@@ -60,7 +61,7 @@ class ParserTree(dict):
 
     @staticmethod
     def parser_to_tree(argparser: ArgumentParser):
-        new = {}
+        new = {'parent': argparser}
 
         if argparser._actions:
             # make a new key dict that represents the parser's arguments
@@ -92,6 +93,23 @@ class ParserTree(dict):
     def disable_required(self):
         # returns a partial tree representing all of the actions that don't have a default
         return ParserTree._disable_required_with_defaults(self)
+
+    def parse(self):
+        # Main issue is that it doesn't take in account bad arguments
+        known, _ = self['parent'].parse_known_args()
+
+        if 'subparsers' in self:
+            subparser: argparse._SubParsersAction = self['subparsers']['group']
+            if subparser.default and subparser.default in self['subparsers']['choices']:
+                return self.combine_namespaces(known, self['subparsers']['choices'][subparser.default].parse())
+        return known
+
+    @staticmethod
+    def combine_namespaces(*namespaces: Namespace):
+        dct = {}
+        for namespace in namespaces:
+            dct.update(namespace.__dict__)
+        return Namespace(**dct)
 
     @staticmethod
     def get_subparsers(argparser: ArgumentParser):
@@ -301,12 +319,9 @@ class ConfigParser:
         ParserTree.reenable_required(still_required)
 
         # sys_exit()
-        parsed_args = self.parser.parse_args()
+        self.parser.parse_args()
 
-        # TODO: Poke subparsers for defaults if the subparser has a default mode
-        # sys_exit()
-
-        return parsed_args
+        return self.parser_tree.parse()
 
     def _convert_type(self, potential_args: list) -> list:
         arg_replacements = {"true": True, "false": False,

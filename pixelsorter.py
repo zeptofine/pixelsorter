@@ -2,76 +2,21 @@ import argparse
 import datetime
 import os
 import subprocess
-# import sys
 import threading
-from multiprocessing import Pool, Queue, Process
+from multiprocessing import Pool, Process, Queue
 from multiprocessing.queues import Full
 from pathlib import Path
+
 import cv2
 import dateutil.parser as timeparser
 import ffmpeg
 import numpy as np
 import psutil
 from tqdm import tqdm
-# from pprint import pprint
 
 from ConfigArgParser import ConfigParser
 
-
-def main_parser() -> argparse.ArgumentParser:
-    # Top-level parser
-    parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    # Global args
-    parser.add_argument("--threshold", type=float, help="Threshold for the sorter algo", required=True)
-    parser.add_argument("--threads", type=int, default=(os.cpu_count() / 4) * 3,
-                        help="number of threads to run the images in parallel.")
-    parser.add_argument("--detector", choices=('default', 'hue', 'saturation', 'value', 'lightness', 'canny'),
-                        help="how the script identifies sets of pixels to sort", default='default')
-    parser.add_argument("--sorter", choices=('default', 'hue', 'saturation', 'value', 'lightness'),
-                        help="how the script sorts the sets of pixels", default='default')
-
-    subparsers = parser.add_subparsers(title="mode MODE", dest="mode",
-                                       help='sub-command help. use --set mode MODE to set a default.')
-    # Picture arg parser
-    parser_pic = subparsers.add_parser('image', formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser_pic.add_argument('-i', '--input', type=str, help="Input to a file to be run.", required=True)
-
-    # Folder arg parser
-    parser_folder = subparsers.add_parser('folder', formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser_folder.add_argument('-i', '--input', type=str,
-                               help="Input to a directory of files to be run. Accepts png, jpeg, webp", required=True)
-    parser_folder.add_argument("--resume", action="store_true", help="continues a folder render.")
-
-    # Video arg parser
-    parser_v = subparsers.add_parser('video', formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-
-    parser_v.add_argument('-i', '--input', type=str,
-                          help="path to a video to convert", required=True)
-    parser_v.add_argument('--preview', action='store_true',
-                          help="""If activated, a cv2 window will appear to preview the images as they are written.
-This is useful for debugging, but adds a little bit of processsing time.""")
-    parser_v.add_argument('--gb_usage', type=float, default=4,
-                          help="Tries to cache as many frames at once that can fit in the set size.")
-    parser_v.add_argument('--chunk_size', type=int,
-                          help="""
-                          number of frames to be rendered in a single pool run.
-                          this should be at least the number of threads in order to utilize them fully
-                          """)
-    # v = parser_v.add_subparsers()
-    # vv = v.add_parser("excuse_me")
-    # vv.add_argument("--thats_incredible")
-
-    return parser
-
-
-def get_file_list(folder: Path, *exts) -> list[Path]:
-    """
-    Args    folders: One or more folder paths.
-    Returns list[Path]: paths in the specified folders."""
-    out = []
-    for ext in exts:
-        out.extend(folder.rglob(ext))
-    return out
+# from pprint import pprint
 
 
 class AbstractSorter:
@@ -213,6 +158,60 @@ class SorterManager:
             new_img[row] = self.sorter.sort_indices(row, self.detector.get_indices(row))
 
         return new_img
+
+# * everything after this point is for main execution
+
+
+def main_parser() -> argparse.ArgumentParser:
+    # Top-level parser
+    parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    # Global args
+    parser.add_argument("--threshold", type=float, help="Threshold for the sorter algo", required=True)
+    parser.add_argument("--threads", type=int, default=(os.cpu_count() / 4) * 3,
+                        help="number of threads to run the images in parallel.")
+    parser.add_argument("--detector", choices=('default', 'hue', 'saturation', 'value', 'lightness', 'canny'),
+                        help="how the script identifies sets of pixels to sort", default='default')
+    parser.add_argument("--sorter", choices=('default', 'hue', 'saturation', 'value', 'lightness'),
+                        help="how the script sorts the sets of pixels", default='default')
+
+    subparsers = parser.add_subparsers(title="mode MODE", dest="mode",
+                                       help='sub-command help. use --set mode MODE to set a default.')
+    # Picture arg parser
+    parser_pic = subparsers.add_parser('image', formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser_pic.add_argument('-i', '--input', type=str, help="Input to a file to be run.", required=True)
+
+    # Folder arg parser
+    parser_folder = subparsers.add_parser('folder', formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser_folder.add_argument('-i', '--input', type=str,
+                               help="Input to a directory of files to be run. Accepts png, jpeg, webp", required=True)
+    parser_folder.add_argument("--resume", action="store_true", help="continues a folder render.")
+
+    # Video arg parser
+    parser_v = subparsers.add_parser('video', formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+
+    parser_v.add_argument('-i', '--input', type=str,
+                          help="path to a video to convert", required=True)
+    parser_v.add_argument('--preview', action='store_true',
+                          help="""If activated, a cv2 window will appear to preview the images as they are written.
+This is useful for debugging, but adds a little bit of processsing time.""")
+    parser_v.add_argument('--gb_usage', type=float, default=4,
+                          help="Tries to cache as many frames at once that can fit in the set size.")
+    parser_v.add_argument('--chunk_size', type=int,
+                          help="""
+                          number of frames to be rendered in a single pool run.
+                          this should be at least the number of threads in order to utilize them fully
+                          """)
+    return parser
+
+
+def get_file_list(folder: Path, *exts) -> list[Path]:
+    """
+    Args    folders: One or more folder paths.
+    Returns list[Path]: paths in the specified folders."""
+    out = []
+    for ext in exts:
+        out.extend(folder.rglob(ext))
+    return out
 
 
 def recursive_mkdir(p: Path):
@@ -488,6 +487,7 @@ if __name__ == "__main__":
         'folder': run_folder,
         'video': run_video
     }
+
     if args.mode and args.mode in modes:
         modes[args.mode](args, sorter)
     else:

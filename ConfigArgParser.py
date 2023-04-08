@@ -1,11 +1,10 @@
-# import argparse
-import orjson
 import os
-import argparse
 from argparse import ArgumentParser, Namespace
-# from pprint import pprint
 from sys import exit as sys_exit
 
+import json
+
+# from pprint import pprint
 # from rich import print as rprint
 
 
@@ -25,7 +24,8 @@ class CfgDict(dict):
         if not isinstance(out_dict, dict):
             out_dict = self
         with open(self.cfg_path, 'w+') as f:
-            f.write(orjson.dumps(out_dict, indent=indent))
+            print(out_dict)
+            f.write(json.dumps(out_dict, indent=indent))
         return self
 
     def update(self, *args, **kwargs):
@@ -45,8 +45,8 @@ class CfgDict(dict):
             with open(self.cfg_path, 'r', encoding='utf-8') as config_file:
                 data = config_file.read()
                 try:
-                    self.update(orjson.loads(data))
-                except (orjson.decoder.JSONDecodeError, TypeError):
+                    self.update(json.loads(data))
+                except (json.decoder.JSONDecodeError, TypeError):
                     print(f'[!] failed to load config.orjson from {self.cfg_path}')
         else:
             self.save({})
@@ -99,7 +99,7 @@ class ParserTree(dict):
         known, _ = self['parent'].parse_known_args()
 
         if 'subparsers' in self:
-            subparser: argparse._SubParsersAction = self['subparsers']['group']
+            subparser = self['subparsers']['group']
             if subparser.default and subparser.default in self['subparsers']['choices']:
                 return self.combine_namespaces(known, self['subparsers']['choices'][subparser.default].parse())
         return known
@@ -152,7 +152,8 @@ class ParserTree(dict):
                 if 'subparsers' in original and key in original['subparsers']['choices']:
                     ParserTree.update_from_flattened_recurs(original['subparsers']['choices'][key], {future: item})
             else:
-                original['actions'][key].default = item
+                if 'actions' in original and key in original['actions']:
+                    original['actions'][key].default = item
 
     @staticmethod
     def _disable_required_with_defaults(subtree):
@@ -184,7 +185,7 @@ class ParserTree(dict):
                     action.required = True
         if 'subparsers' in required:
             for dest, subparser in required['subparsers']['choices'].items():
-                ParserTree.reenable_required(required['subparsers']['choices'][dest])
+                ParserTree.reenable_required(subparser)
 
     # def __getitem__(self, key):
     #     if not isinstance(key, tuple):
@@ -209,7 +210,7 @@ class ConfigParser:
     It saves given args to a path, and returns them when args are parsed again.'''
 
     def __init__(self, parser: ArgumentParser,
-                 config_path, cfgObject: CfgDict = None, autofill: bool = False, exit_on_change: bool = False):
+                 config_path, cfgObject: CfgDict = None, exit_on_change: bool = False):
         '''An argparse config utility made to wrap an ArgumentParser
 
         Parameters:
@@ -226,7 +227,6 @@ class ConfigParser:
         self.config_path = config_path
         self.default_prefix = '-' if '-' in self._parent.prefix_chars else self._parent.prefix_chars[0]
         self.exit_on_change = exit_on_change
-        self.autofill = autofill
         self.file = cfgObject or CfgDict(config_path)
 
         # set up subparser
@@ -250,11 +250,11 @@ class ConfigParser:
         self.config_option_group = self.parser.add_argument_group(
             'Config options')
         self.config_options = self.config_option_group.add_mutually_exclusive_group()
-        self.config_options.add_argument(self.default_prefix*2+"set", nargs=2, metavar=('KEY', 'VAL'),
+        self.config_options.add_argument(self.default_prefix * 2 + "set", nargs=2, metavar=('KEY', 'VAL'),
                                          help="change a default argument's options")
-        self.config_options.add_argument(self.default_prefix*2+"reset", metavar='VALUE', nargs="*",
+        self.config_options.add_argument(self.default_prefix * 2 + "reset", metavar='VALUE', nargs="*",
                                          help="removes a changed option.")
-        self.config_options.add_argument(self.default_prefix*2+"reset_all", action="store_true",
+        self.config_options.add_argument(self.default_prefix * 2 + "reset_all", action="store_true",
                                          help="resets every option.")
 
         # get defaults from the actions
@@ -262,13 +262,6 @@ class ConfigParser:
         self.parser_tree = ParserTree(self._parent)
 
         self.file.load()
-
-        # if self.autofill:
-        #     if any(arg not in self.file for arg in self.kwargs):  # To avoid saving every time the parser is run
-        #         for arg in self.kwargs:
-        #             if arg not in self.file:
-        #                 self.file.update({arg: self.kwargs[arg]})
-        #         self.file.save()
 
     def parse_args(self, **kwargs) -> Namespace:
         '''args.set, reset, reset_all logic'''
@@ -281,12 +274,8 @@ class ConfigParser:
         self.kwargs = ParserTree.flatten(self.parser_tree.get_defaults())
 
         # disable every required item that wasn in the file
-        # required_args = self.parser_tree.get_required()
         still_required = self.parser_tree.disable_required()
 
-        # required_args = get_required_tree(self.parser_tree)
-        # disabled_args = disable_required_tree(required_args)
-        # rprint(self.subparser_tree)
         self.parsed_args, _ = self.parser.parse_known_args(**kwargs)
 
         # TODO: make set, reset, and reset_all work for subparsers

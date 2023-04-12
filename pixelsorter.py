@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import argparse
 import datetime
 import os
@@ -12,11 +14,8 @@ import dateutil.parser as timeparser
 import ffmpeg
 import numpy as np
 import psutil
+from cfg_argparser import ConfigArgParser
 from tqdm import tqdm
-
-from ConfigArgParser import ConfigParser
-
-# from pprint import pprint
 
 
 class AbstractSorter:
@@ -26,7 +25,7 @@ class AbstractSorter:
     def apply(self, img: np.ndarray):
         self.img = np.dstack((img, cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)))
 
-    def set_thresh(self, thresh):
+    def set_thresh(self, thresh: int):
         self.thresh = thresh
 
     def __repr__(self):
@@ -40,7 +39,7 @@ class AbstractSorter:
         out = ", ".join(attrlist)
         return f"{self.__class__.__name__}({out})"
 
-    def pix_set_sort(self, row, start, end):
+    def pix_set_sort(self, row: int, start: int, end: int):
         return np.stack(sorted(self.img[row, start:end],
                                key=lambda line: line[-1]))[:, :-1]
 
@@ -52,7 +51,7 @@ class AbstractSorter:
                 pivot = col
         yield self.img.shape[1]
 
-    def sort_indices(self, row: int, indices) -> np.ndarray:
+    def sort_indices(self, row: int, indices: list[int]) -> np.ndarray:
         pivot = 0
         lst = []
         for col in indices:
@@ -137,7 +136,7 @@ class SorterManager:
     def setSorter(self, sorter):
         self.sorter: AbstractSorter = sorter
 
-    def apply(self, img: np.ndarray, use_tqdm=False):
+    def apply(self, img: np.ndarray, use_tqdm=False, mogrify=False):
 
         self.detector.apply(img)
         if not self.detector == self.sorter:
@@ -145,8 +144,10 @@ class SorterManager:
 
         # Make a copy of the image so the original is preserved
         # (The detector and sorter only reads the image)
-        new_img = img.copy()
-        # new_img = img
+        if mogrify:
+            new_img = img
+        else:
+            new_img = img.copy()
 
         iterable = range(img.shape[0])
         if use_tqdm:
@@ -155,18 +156,20 @@ class SorterManager:
         for row in iterable:
             # Get the indices of pixels to sort.
             # self.detector.iterate_through_row(row)
-            new_img[row] = self.sorter.sort_indices(row, self.detector.get_indices(row))
+            new_img[row] = self.sorter.sort_indices(
+                row, self.detector.get_indices(row))
 
         return new_img
-
-# * everything after this point is for main execution
 
 
 def main_parser() -> argparse.ArgumentParser:
     # Top-level parser
-    parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser = argparse.ArgumentParser(
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        fromfile_prefix_chars="@")
     # Global args
-    parser.add_argument("--threshold", type=float, help="Threshold for the sorter algo", required=True)
+    parser.add_argument("--threshold", type=float,
+                        help="Threshold for the sorter algo", required=True)
     parser.add_argument("--threads", type=int, default=(os.cpu_count() / 4) * 3,
                         help="number of threads to run the images in parallel.")
     parser.add_argument("--detector", choices=('default', 'hue', 'saturation', 'value', 'lightness', 'canny'),
@@ -177,17 +180,22 @@ def main_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(title="mode MODE", dest="mode",
                                        help='sub-command help. use --set mode MODE to set a default.')
     # Picture arg parser
-    parser_pic = subparsers.add_parser('image', formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser_pic.add_argument('-i', '--input', type=str, help="Input to a file to be run.", required=True)
+    parser_pic = subparsers.add_parser(
+        'image', formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser_pic.add_argument('-i', '--input', type=str,
+                            help="Input to a file to be run.", required=True)
 
     # Folder arg parser
-    parser_folder = subparsers.add_parser('folder', formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser_folder = subparsers.add_parser(
+        'folder', formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser_folder.add_argument('-i', '--input', type=str,
                                help="Input to a directory of files to be run. Accepts png, jpeg, webp", required=True)
-    parser_folder.add_argument("--resume", action="store_true", help="continues a folder render.")
+    parser_folder.add_argument(
+        "--resume", action="store_true", help="continues a folder render.")
 
     # Video arg parser
-    parser_v = subparsers.add_parser('video', formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser_v = subparsers.add_parser(
+        'video', formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 
     parser_v.add_argument('-i', '--input', type=str,
                           help="path to a video to convert", required=True)
@@ -230,7 +238,8 @@ def run_sorter(zipped):
     return sorted_img
 
 
-def read_frames(continue_event: threading.Event, in_thread: subprocess.Popen, in_queue: Queue, shape, read_size, chunksize=12):
+def read_frames(continue_event: threading.Event, in_thread: subprocess.Popen, in_queue: Queue,
+                shape, read_size, chunksize=12):
     print("started reading frames")
     frame_stack = []
     while continue_event.is_set():
@@ -246,7 +255,6 @@ def read_frames(continue_event: threading.Event, in_thread: subprocess.Popen, in
                 in_queue.put(frame_stack, timeout=2)
 
             except Full:
-                # print("Images have taken 30 extra seconds to add to the queue")
                 continue
             frame_stack = []
         else:
@@ -283,7 +291,8 @@ def run_folder(args: argparse.Namespace, sorter: SorterManager):
     print("getting list...")
     image_list = get_file_list(Path(args.input), "*.png", "*.jpg", "*.webp")
 
-    out_dict = {image: out_folder / image.relative_to(folder) for image in image_list}
+    out_dict = {image: out_folder /
+                image.relative_to(folder) for image in image_list}
 
     if args.resume:
         print("filtering existing images...")
@@ -312,7 +321,8 @@ def run_video(args: argparse.Namespace, sorter: SorterManager):
     # get video info
     print("getting video info")
     probe = ffmpeg.probe(args.input)
-    video_stream = [stream for stream in probe['streams'] if stream['codec_type'] == 'video'][0]
+    video_stream = [stream for stream in probe['streams']
+                    if stream['codec_type'] == 'video'][0]
     width = int(video_stream['width'])
     height = int(video_stream['height'])
 
@@ -323,7 +333,8 @@ def run_video(args: argparse.Namespace, sorter: SorterManager):
 
     # get total frame count
     duration = timeparser.parse(video_stream['tags']['DURATION']).time()
-    t = datetime.datetime.combine(datetime.date.min, duration) - datetime.datetime.min
+    t = datetime.datetime.combine(
+        datetime.date.min, duration) - datetime.datetime.min
     total_frames = int(t.total_seconds() * framerate)
 
     video = ffmpeg.input(str(video_path))
@@ -374,8 +385,8 @@ def run_video(args: argparse.Namespace, sorter: SorterManager):
         frame_chunk_size = args.threads * 2
     else:
         frame_chunk_size = args.chunk_size
-    gb_usage = args.gb_usage
-    gb_usage_in_bytes = int(gb_usage * (10**9))
+
+    gb_usage_in_bytes = int(args.gb_usage * (10**9))
 
     # Example:
     # free memory before: 18.58 GB
@@ -410,7 +421,7 @@ def run_video(args: argparse.Namespace, sorter: SorterManager):
     queue_size = int(gb_usage_in_bytes // read_size // frame_chunk_size)
 
     frame_queue = Queue(queue_size)
-    # reads the frames coming in from the video and adds list[np.ndarray]'s to frame_queue asynchronously
+    # reads the frames coming in from the video and adds list[np.ndarray] to frame_queue asynchronously
     continue_event = threading.Event()
     continue_event.set()
     reader = Process(target=read_frames, args=(continue_event, thread_in, frame_queue,
@@ -455,9 +466,8 @@ def run_video(args: argparse.Namespace, sorter: SorterManager):
 
 
 if __name__ == "__main__":
-
     parser = main_parser()
-    args = ConfigParser(
+    args = ConfigArgParser(
         parser,
         "config.json"
     ).parse_args()

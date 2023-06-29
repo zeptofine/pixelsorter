@@ -1,8 +1,11 @@
 {
   "editor.formatOnSave": true,
-  "python.analysis.typeCheckingMode": "off",
-  "python.formatting.autopep8Args": ["--max-line-length=120"],
+  "python.analysis.typeCheckingMode": "basic",
   "[python]": {
-    "editor.defaultFormatter": "ms-python.python"
-  }
+    "editor.defaultFormatter": "ms-python.black-formatter"
+  },
+  "black-formatter.args": [
+    "--line-length=120"
+  ],
+  "python.formatting.provider": "none"
 }

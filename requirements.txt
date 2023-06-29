@@ -1,8 +1,8 @@
 autopep8
-cfg-argparser
 ffmpeg-python
 numpy
 opencv-python
 psutil
 python-dateutil
 tqdm
+typer[all]

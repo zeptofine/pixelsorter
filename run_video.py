@@ -20,8 +20,6 @@ from sorters import SORTER_DICT, Sorters
 
 CPU_COUNT: int = cpu_count()
 
-app = typer.Typer()
-
 
 def read_frames(
     in_thread: subprocess.Popen,
@@ -53,15 +51,16 @@ def read_frames(
             break
 
 
-@app.command()
-def run_img(
+def run_vid(
     video_path: Annotated[Path, typer.Argument(help="the input video to sort")],
     output: Annotated[
         Optional[Path], typer.Option(help="where to output to. if empty, appends `-pixelsorted` to input.")
     ] = None,
     sorter: Annotated[Sorters, typer.Option(help="what sorter to actually sort sections with")] = Sorters.GRAY,
     detector: Annotated[Sorters, typer.Option(help="how to detect sections")] = Sorters.CANNY,
-    detector_threshold: int = 100,
+    detector_threshold: Annotated[
+        int, typer.Option(help="the detection threshold with which to create the mask")
+    ] = 100,
     preview: Annotated[
         bool,
         typer.Option(
@@ -128,7 +127,7 @@ def run_img(
     # the number of frames to read in one chunk
     frame_chunk_size = chunksize or 12
 
-    gb_usage_in_bytes = int(gb_usage * (10**9))
+    gb_usage_bytes = int(gb_usage * (10**9))
 
     # Example:
     # free memory before: 18.58 GB
@@ -142,26 +141,24 @@ def run_img(
     virtual_memory = psutil.virtual_memory()
 
     print(f"free memory before: {virtual_memory.available / (10 ** 9):.2f} GB")
-    print(
-        f"free memory with predicted given usage: {(virtual_memory.available - gb_usage_in_bytes) / (10 ** 9):.2f} GB"
-    )
-    if virtual_memory.available - gb_usage_in_bytes < 10**9:
+    print(f"free memory with predicted given usage: {(virtual_memory.available - gb_usage_bytes) / (10 ** 9):.2f} GB")
+    if virtual_memory.available - gb_usage_bytes < 10**9:
         print("Chosen memory usage is too large, resizing for a minimum of 1 gb free")
 
-        while virtual_memory.available - gb_usage_in_bytes < 10**9:
-            gb_usage_in_bytes -= 10**9
-        print(f"using {gb_usage_in_bytes // (10 ** 9):.2f} GB")
+        while virtual_memory.available - gb_usage_bytes < 10**9:
+            gb_usage_bytes -= 10**9
+        print(f"using {gb_usage_bytes // (10 ** 9):.2f} GB")
 
     # estimate the total number of bytes in the video
     total_usage = read_size * total_frames
 
     # if the total number of bytes in the video is smaller than the allowed ram threshold
-    if total_usage < gb_usage_in_bytes:
+    if total_usage < gb_usage_bytes:
         print("estimaged total usage is less than given usage. Video will likely fit in less space than specified")
         print(f"free memory with predicted total usage: {(virtual_memory.available - total_usage) / (10 ** 9):.2f} GB")
 
     # calculate how many images can fit in a given amount of memory
-    queue_size = int(gb_usage_in_bytes // read_size // frame_chunk_size)
+    queue_size = int(gb_usage_bytes // read_size // frame_chunk_size)
 
     frame_queue = Queue(queue_size)
     # reads the frames coming in from the video and adds list[np.ndarray] to frame_queue asynchronously
@@ -216,4 +213,4 @@ def run_img(
 
 
 if __name__ == "__main__":
-    app()
+    typer.run(run_vid)

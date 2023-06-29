@@ -45,28 +45,43 @@ class AbstractSorter:
             if abs(row[pivot] - row[col]) > thresh:
                 yield col
                 pivot: int = col
-        yield row.shape[0]
 
     @staticmethod
-    def sort_set(
-        row: ndarray,
-        sort_guide: ndarray,
-    ) -> ndarray:
-        return np.take(row, np.argsort(sort_guide), axis=0)
-
     def sort_indices(
-        self,
         original: ndarray,
         sort_by: ndarray,
         index_separators: Generator[int, None, None],
     ) -> ndarray:
-        pivot = 0
-        return np.concatenate(
+        sort_stack = np.column_stack(
+            (
+                sort_by,
+                AbstractSorter.enumerate_indices(
+                    sort_by,
+                    list(index_separators),
+                ),
+            )
+        )
+        return original[np.lexsort((sort_stack[:, 0], sort_stack[:, 1]))]
+
+    @staticmethod
+    def enumerate_indices(arr: np.ndarray, indices: list[int]) -> ndarray:
+        if not indices:
+            return np.array([0] * len(arr))
+        return np.array(
             [
-                (self.sort_set(original[pivot:col], sort_by[pivot:col]), pivot := col)[0]  # I hate this
-                for col in index_separators
-            ],
-            axis=0,
+                y
+                for x in (
+                    [idx] * value
+                    for idx, value in enumerate(
+                        (
+                            indices[0],
+                            *[indices[idx] - indices[idx - 1] for idx in range(1, len(indices))],
+                            len(arr) - indices[-1],
+                        )
+                    )
+                )
+                for y in x
+            ]
         )
 
     def __repr__(self):
@@ -134,12 +149,12 @@ class Canny(AbstractSorter):
             self.thresh,
         )
 
+    def get_indices(self, row: ndarray) -> Generator[int, None, None]:
+        return self._get_indices(row)
+
     @staticmethod
-    def _get_indices(_, row: ndarray) -> Generator[int, None, None]:
-        for col in range(1, row.shape[0]):
-            if row[col]:
-                yield col
-        yield row.shape[0]
+    def _get_indices(row: ndarray):
+        return (col for col in range(1, row.shape[0]) if row[col])
 
 
 class Sorters(str, Enum):

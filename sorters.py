@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from collections.abc import Generator, Iterable
 from enum import Enum
+
 import cv2
 import numpy as np
 from numpy import ndarray
-from tqdm import tqdm
 
 
 class AbstractSorter:
@@ -15,19 +15,17 @@ class AbstractSorter:
     def set_thresh(self, thresh: int):
         self.thresh = thresh
 
-    def apply(self, img: ndarray, detector: AbstractSorter | None = None, use_tqdm=False):
-        return np.array(list(self.iter_apply(img, detector, use_tqdm)))
+    def apply(self, img: ndarray, detector: AbstractSorter | None = None):
+        return np.array(list(self.iter_apply(img, detector)))
 
-    def iter_apply(self, img: ndarray, detector: AbstractSorter | None = None, use_tqdm=False):
+    def iter_apply(self, img: ndarray, detector: AbstractSorter | None = None):
         if detector is None:
             detector = self
 
         return (
             self.sort_indices(*rows)
             for rows in zip(
-                tqdm(img) if use_tqdm else img,
-                self.create_mask(img),
-                (detector.get_indices(row) for row in detector.create_mask(img)),
+                img, self.create_mask(img), (detector.get_indices(row) for row in detector.create_mask(img))
             )
         )
 
@@ -61,9 +59,9 @@ class AbstractSorter:
 
     @staticmethod
     def enumerate_via_indices(arr: np.ndarray, indices: list[int]) -> ndarray:
-        lengths: tuple[int] = (
+        lengths: Iterable[int] = (
             indices[0],
-            *[indices[idx] - indices[idx - 1] for idx in range(1, len(indices))],
+            *(indices[idx] - indices[idx - 1] for idx in range(1, len(indices))),
             len(arr) - indices[-1],
         )
         stretched_lengths = AbstractSorter._stretch_lengths(lengths)
@@ -87,11 +85,11 @@ class AbstractSorter:
         out = ", ".join(attrlist)
         return f"{self.__class__.__name__}({out})"
 
-    def apply_with(self, detector: AbstractSorter, use_tqdm=False):
+    def apply_with(self, detector: AbstractSorter):
         """sorter.apply_with(detector)(image)"""
 
         def _apply(img):
-            return self.apply(img, detector, use_tqdm=use_tqdm)
+            return self.apply(img, detector)
 
         return _apply
 

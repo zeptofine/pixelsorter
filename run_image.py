@@ -24,7 +24,7 @@ def run_img(
     print("Sorting...")
     s = SORTER_DICT[sorter](0)
     d = SORTER_DICT[detector](detector_threshold)
-    imsorted = s.apply(image, d, use_tqdm=True)
+    imsorted = s.apply(image, d)
     cv2.imwrite(str(output), imsorted)
 
 

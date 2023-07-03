@@ -97,7 +97,7 @@ def run_vid(
     thread_in: subprocess.Popen = video.output("pipe:", format="rawvideo", pix_fmt="rgb24").run_async(
         pipe_stdout=True, quiet=True
     )
-    thread_out = (
+    thread_out: subprocess.Popen = (
         ffmpeg.output(
             ffmpeg.input(
                 "pipe:",
@@ -118,6 +118,8 @@ def run_vid(
             pipe_stdin=True,
         )
     )
+    assert thread_out.stdin
+    assert thread_in.stdout
 
     _start_time = datetime.datetime.now()
 
@@ -161,13 +163,15 @@ def run_vid(
     queue_size = int(gb_usage_bytes // read_size // frame_chunk_size)
 
     frame_queue = Queue(queue_size)
+
     # reads the frames coming in from the video and adds list[np.ndarray] to frame_queue asynchronously
+    shape = (height, width, 3)
     reader = Process(
         target=read_frames,
         args=(
             thread_in,
             frame_queue,
-            [height, width, 3],
+            shape,
             read_size,
             frame_chunk_size,
         ),
@@ -178,8 +182,14 @@ def run_vid(
     d = SORTER_DICT[detector](detector_threshold)
     applier = s.apply_with(d)
 
-    with tqdm(total=total_frames, smoothing=0.9) as tq:
+    with tqdm(total=total_frames, unit="frame", smoothing=0.9) as tq:
         timeprobe = time.perf_counter()
+        max_preview_size = 1024
+        shape = shape[:2][::-1]
+        ratio: float = max_preview_size / max(shape)
+        if ratio < 1:
+            shape = tuple(int(ratio * i) for i in shape)
+
         try:
             while True:
                 # get a collection of frames
@@ -193,7 +203,10 @@ def run_vid(
                     tq.update()
                     thread_out.stdin.write(cv2.cvtColor(out_frame, cv2.COLOR_BGR2RGB).tobytes())
                     if preview and (_t := time.perf_counter()) - timeprobe > 1:
-                        cv2.imshow("out", out_frame)
+                        if ratio < 1:
+                            cv2.imshow("out", cv2.resize(out_frame, shape))
+                        else:
+                            cv2.imshow("out", out_frame)
                         cv2.waitKey(1)
                         timeprobe = _t
 

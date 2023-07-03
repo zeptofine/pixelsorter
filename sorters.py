@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-from collections.abc import Generator
-
+from collections.abc import Generator, Iterable
+from enum import Enum
 import cv2
 import numpy as np
 from numpy import ndarray
 from tqdm import tqdm
-from enum import Enum
 
 
 class AbstractSorter:
@@ -52,37 +51,33 @@ class AbstractSorter:
         sort_by: ndarray,
         index_separators: Generator[int, None, None],
     ) -> ndarray:
-        sort_stack = np.column_stack(
-            (
-                sort_by,
-                AbstractSorter.enumerate_indices(
-                    sort_by,
-                    list(index_separators),
-                ),
-            )
-        )
-        return original[np.lexsort((sort_stack[:, 0], sort_stack[:, 1]))]
+        indices = list(index_separators)
+        if not indices:
+            sorted_index_arr = np.argsort(sort_by)
+        else:
+            sort_stack = AbstractSorter.enumerate_via_indices(sort_by, indices)
+            sorted_index_arr = np.lexsort((sort_stack[:, 0], sort_stack[:, 1]))
+        return original[sorted_index_arr]  # type: ignore
 
     @staticmethod
-    def enumerate_indices(arr: np.ndarray, indices: list[int]) -> ndarray:
-        if not indices:
-            return np.array([0] * len(arr))
-        return np.array(
-            [
-                y
-                for x in (
-                    [idx] * value
-                    for idx, value in enumerate(
-                        (
-                            indices[0],
-                            *[indices[idx] - indices[idx - 1] for idx in range(1, len(indices))],
-                            len(arr) - indices[-1],
-                        )
-                    )
-                )
-                for y in x
-            ]
+    def enumerate_via_indices(arr: np.ndarray, indices: list[int]) -> ndarray:
+        lengths: tuple[int] = (
+            indices[0],
+            *[indices[idx] - indices[idx - 1] for idx in range(1, len(indices))],
+            len(arr) - indices[-1],
         )
+        stretched_lengths = AbstractSorter._stretch_lengths(lengths)
+        return np.column_stack((arr, np.array(list(stretched_lengths))))
+
+    @staticmethod
+    def _stretch_lengths(values: Iterable[int]):
+        """
+        eg. [3, 4, 2, 1, 0, 4]
+            [0]*3, [1]*4, [2]*2, [3]*1, [4]*0, [5]*4
+        -> [0, 0, 0, 1, 1, 1, 1, 2, 2, 3, 5, 5, 5, 5]"""
+        for idx, value in enumerate(values):
+            for _ in range(value):
+                yield idx
 
     def __repr__(self):
         attrlist = [
@@ -139,12 +134,15 @@ class Canny(AbstractSorter):
         self.sigma = sigma
 
     def create_mask(self, img: ndarray):
+        blurred = cv2.GaussianBlur(
+            img,
+            self.blur_size,
+            self.sigma,
+        )
+        if blurred.dtype == np.uint16:
+            blurred = (blurred // 256).astype(np.uint8)
         return cv2.Canny(
-            cv2.GaussianBlur(
-                img,
-                self.blur_size,
-                self.sigma,
-            ),
+            blurred,
             self.thresh,
             self.thresh,
         )

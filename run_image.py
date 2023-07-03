@@ -20,7 +20,7 @@ def run_img(
     assert input_img.exists(), "Image does not exist"
     output = output or input_img.with_stem(f"{input_img.stem}-pixelsorted")
     print("Reading image...")
-    image = cv2.imread(str(input_img))
+    image = cv2.imread(str(input_img), cv2.IMREAD_UNCHANGED)
     print("Sorting...")
     s = SORTER_DICT[sorter](0)
     d = SORTER_DICT[detector](detector_threshold)

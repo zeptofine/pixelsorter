@@ -26,10 +26,10 @@ class Scenario:
     output: Path
 
 
-def parse_scenario(scen: Scenario):
-    img = cv2.imread(str(scen.file), cv2.IMREAD_UNCHANGED)
-    im_sorted = scen.sorter(0).apply(img, scen.detector(scen.thresh))
-    cv2.imwrite(str(scen.output), im_sorted)
+def parse_scenario(s: Scenario):
+    img = cv2.imread(str(s.file), cv2.IMREAD_UNCHANGED)
+    im_sorted = s.sorter(0).apply(img, s.detector(s.thresh))
+    cv2.imwrite(str(s.output), im_sorted)
 
 
 @app.command()

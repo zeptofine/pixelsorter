@@ -25,6 +25,7 @@ def run_img(
     s = SORTER_DICT[sorter](0)
     d = SORTER_DICT[detector](detector_threshold)
     imsorted = s.apply(image, d)
+    print("Saving...")
     cv2.imwrite(str(output), imsorted)
 
 

@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from collections.abc import Generator, Iterable
 from enum import Enum
 
 import cv2
 import numpy as np
+from numba import jit
 from numpy import ndarray
 
 
@@ -22,65 +22,53 @@ class AbstractSorter:
         if detector is None:
             detector = self
 
+        mask = self.create_mask(img)
+        detected = [detector.get_indices(row) for row in detector.create_mask(img)]
+
         return (
-            self.sort_indices(*rows)
-            for rows in zip(
-                img, self.create_mask(img), (detector.get_indices(row) for row in detector.create_mask(img))
-            )
+            self.sort_indices(original, sort_by, separators)
+            for original, sort_by, separators in zip(img, mask, detected)
         )
 
     def create_mask(self, img: ndarray):
         return cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
-    def get_indices(self, row: ndarray) -> Generator[int, None, None]:
-        return self._get_indices(self.thresh, row)
+    def get_indices(self, row: ndarray):
+        return np.array([*self._get_indices(self.thresh, row)])
 
     @staticmethod
-    def _get_indices(thresh, row: ndarray) -> Generator[int, None, None]:
+    @jit(nopython=True)
+    def _get_indices(thresh: int, row: ndarray):
         pivot = 0
         for col in range(1, row.shape[0]):
             if abs(row[pivot] - row[col]) > thresh:
                 yield col
                 pivot: int = col
 
-    @staticmethod
+    @classmethod
     def sort_indices(
+        cls,
         original: ndarray,
         sort_by: ndarray,
-        index_separators: Generator[int, None, None],
+        indices: ndarray,
     ) -> ndarray:
-        indices = list(index_separators)
-        if not indices:
+        if not len(indices):
             sorted_index_arr = np.argsort(sort_by)
         else:
-            sort_stack = AbstractSorter.enumerate_via_indices(sort_by, indices)
+            sort_stack = cls.enumerate_via_indices(sort_by, indices)
             sorted_index_arr = np.lexsort((sort_stack[:, 0], sort_stack[:, 1]))
         return original[sorted_index_arr]  # type: ignore
 
     @staticmethod
-    def enumerate_via_indices(arr: np.ndarray, indices: list[int]) -> ndarray:
-        lengths: Iterable[int] = (
-            indices[0],
-            *(indices[idx] - indices[idx - 1] for idx in range(1, len(indices))),
-            len(arr) - indices[-1],
-        )
-        stretched_lengths = AbstractSorter._stretch_lengths(lengths)
-        return np.column_stack((arr, np.array(list(stretched_lengths))))
-
-    @staticmethod
-    def _stretch_lengths(values: Iterable[int]):
-        """
-        eg. [3, 4, 2, 1, 0, 4]
-            [0]*3, [1]*4, [2]*2, [3]*1, [4]*0, [5]*4
-        -> [0, 0, 0, 1, 1, 1, 1, 2, 2, 3, 5, 5, 5, 5]"""
-        for idx, value in enumerate(values):
-            for _ in range(value):
-                yield idx
+    def enumerate_via_indices(arr: ndarray, indices: ndarray) -> ndarray:
+        lengths = np.hstack((indices[0], np.diff(indices), len(arr) - indices[-1]))
+        stretched = np.repeat(np.arange(len(lengths)), lengths)
+        return np.column_stack((arr, stretched))
 
     def __repr__(self):
         attrlist = [
             f"{key}=..." if hasattr(val, "__iter__") and not isinstance(val, str) else f"{key}={val}"
-            for key, val in self.__dict__.items()  # type: ignore
+            for key, val in vars(self).items()  # type: ignore
         ]
         out = ", ".join(attrlist)
         return f"{self.__class__.__name__}({out})"
@@ -131,8 +119,9 @@ class Canny(AbstractSorter):
         self.blur_size = blur_size
         self.sigma = sigma
 
+    @jit(forceobj=True)
     def create_mask(self, img: ndarray):
-        blurred = cv2.GaussianBlur(
+        blurred: np.ndarray = cv2.GaussianBlur(
             img,
             self.blur_size,
             self.sigma,
@@ -145,12 +134,13 @@ class Canny(AbstractSorter):
             self.thresh,
         )
 
-    def get_indices(self, row: ndarray) -> Generator[int, None, None]:
+    def get_indices(self, row: ndarray):
         return self._get_indices(row)
 
     @staticmethod
+    @jit(nopython=True)
     def _get_indices(row: ndarray):
-        return (col for col in range(1, row.shape[0]) if row[col])
+        return np.where(row)[0]
 
 
 class Sorters(str, Enum):

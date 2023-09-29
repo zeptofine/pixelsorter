@@ -58,9 +58,7 @@ def run_vid(
     ] = None,
     sorter: Annotated[Sorters, typer.Option(help="what sorter to actually sort sections with")] = Sorters.GRAY,
     detector: Annotated[Sorters, typer.Option(help="how to detect sections")] = Sorters.CANNY,
-    detector_threshold: Annotated[
-        int, typer.Option(help="the detection threshold with which to create the mask")
-    ] = 100,
+    threshold: Annotated[int, typer.Option(help="the detection threshold with which to create the mask")] = 100,
     preview: Annotated[
         bool,
         typer.Option(
@@ -68,6 +66,7 @@ def run_vid(
                      This is useful for debugging, but adds a little bit of processsing time."""
         ),
     ] = False,
+    preview_interval: Annotated[int, typer.Option(help="The interval which to show a preview image: 1/n")] = 12,
     gb_usage: Annotated[
         float, typer.Option(help="Tries to cache only as many frames that can fit in this gb threshold.")
     ] = 4,
@@ -179,7 +178,7 @@ def run_vid(
     reader.daemon = True
     reader.start()
     s = SORTER_DICT[sorter](0)
-    d = SORTER_DICT[detector](detector_threshold)
+    d = SORTER_DICT[detector](threshold)
     applier = s.apply_with(d)
 
     with tqdm(total=total_frames, unit="frame", smoothing=0.9) as tq:
@@ -202,7 +201,7 @@ def run_vid(
                 for out_frame in map(applier, chunk_of_frames):
                     tq.update()
                     thread_out.stdin.write(cv2.cvtColor(out_frame, cv2.COLOR_BGR2RGB).tobytes())
-                    if preview and (_t := time.perf_counter()) - timeprobe > 1:
+                    if preview and (_t := time.perf_counter()) - timeprobe > 1 / preview_interval:
                         if ratio < 1:
                             cv2.imshow("out", cv2.resize(out_frame, shape))
                         else:

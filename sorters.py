@@ -9,10 +9,10 @@ from numpy import ndarray
 
 
 class AbstractSorter:
-    def __init__(self, thresh: int):
+    def __init__(self, thresh: int | float):
         self.set_thresh(thresh)
 
-    def set_thresh(self, thresh: int):
+    def set_thresh(self, thresh: int | float):
         self.thresh = thresh
 
     def apply(self, img: ndarray, detector: AbstractSorter | None = None):
@@ -22,23 +22,26 @@ class AbstractSorter:
         if detector is None:
             detector = self
 
-        mask = self.create_mask(img)
-        detected = [detector.get_indices(row) for row in detector.create_mask(img)]
+        sort_mask = self.create_mask(img)
+        detection_mask = detector.create_mask(img)
+        detected = [detector.get_indices(row) for row in detection_mask]
 
         return (
             self.sort_indices(original, sort_by, separators)
-            for original, sort_by, separators in zip(img, mask, detected)
+            for original, sort_by, separators in zip(img, sort_mask, detected)
         )
 
     def create_mask(self, img: ndarray):
+        if len(img.shape) < 3:
+            return img
         return cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
     def get_indices(self, row: ndarray):
-        return np.array([*self._get_indices(self.thresh, row)])
+        return np.array(list(self._get_indices(self.thresh, row)))
 
     @staticmethod
     @jit(nopython=True)
-    def _get_indices(thresh: int, row: ndarray):
+    def _get_indices(thresh: int | float, row: ndarray):
         pivot = 0
         for col in range(1, row.shape[0]):
             if abs(row[pivot] - row[col]) > thresh:

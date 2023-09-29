@@ -1,48 +1,30 @@
 from __future__ import annotations
 
 from collections.abc import Generator, Iterable
-from dataclasses import dataclass
 from multiprocessing import Pool, cpu_count
 from pathlib import Path
 from typing import Annotated, Optional
 
-import cv2
 import typer
 from tqdm import tqdm
 
-from sorters import SORTER_DICT, AbstractSorter, Sorters
+from run_image import Scenario, parse_scenario
+from sorters import SORTER_DICT, Sorters
 
 CPU_COUNT: int = cpu_count()
 
 app = typer.Typer()
 
 
-@dataclass
-class Scenario:
-    sorter: type[AbstractSorter]
-    detector: type[AbstractSorter]
-    thresh: int
-    file: Path
-    output: Path
-
-
-def parse_scenario(s: Scenario):
-    img = cv2.imread(str(s.file), cv2.IMREAD_UNCHANGED)
-    im_sorted = s.sorter(0).apply(img, s.detector(s.thresh))
-    cv2.imwrite(str(s.output), im_sorted)
-
-
 @app.command()
 def run_folder(
     folder_path: Annotated[Path, typer.Argument(help="the input folder to sort")],
     output: Annotated[
-        Optional[Path], typer.Option(help="where to output to. if empty, appends `-pixelsorted` to input.")
+        Optional[Path], typer.Option(help="where to output to. appends `-pixelsorted` to input by default.")
     ] = None,
     sorter: Annotated[Sorters, typer.Option(help="what sorter to actually sort sections with")] = Sorters.GRAY,
     detector: Annotated[Sorters, typer.Option(help="how to detect sections")] = Sorters.CANNY,
-    detector_threshold: Annotated[
-        int, typer.Option(help="the detection threshold with which to create the mask")
-    ] = 100,
+    threshold: Annotated[int, typer.Option(help="the detection threshold with which to create the mask")] = 100,
 ):
     assert folder_path.exists(), "folder path does not exist"
     output = output or folder_path.with_stem(f"{folder_path.stem}-pixelsorted")
@@ -52,14 +34,15 @@ def run_folder(
 
     def get_scenarios(pths: Iterable[Path]) -> Generator[Scenario, None, None]:
         for path in pths:
+            if not path.is_file():
+                continue
             relpath = path.relative_to(folder_path)
-            yield Scenario(s, d, detector_threshold, path, output / relpath)
+            yield Scenario(s, d, threshold, path, output / relpath)
 
     files = list(get_scenarios(folder_path.rglob("*")))
     with Pool(9) as p:
         for _ in tqdm(p.imap(parse_scenario, files), total=len(files)):
             pass
-    # pprint(list(files))
 
 
 if __name__ == "__main__":

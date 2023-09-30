@@ -35,7 +35,7 @@ def run_img(
     ] = None,
     sorter: Annotated[Sorters, typer.Option(help="what sorter to actually sort sections with")] = Sorters.GRAY,
     detector: Annotated[Sorters, typer.Option(help="how to detect sections")] = Sorters.CANNY,
-    detector_threshold: float = 100,
+    detector_threshold: float = 1,
 ):
     assert input_img.exists(), "Image does not exist"
     output = output or input_img.with_stem(f"{input_img.stem}-pixelsorted")

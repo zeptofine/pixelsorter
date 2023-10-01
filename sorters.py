@@ -100,10 +100,11 @@ class AbstractSorter:
 
 
 class HSV(AbstractSorter):
-    def __init__(self, channel: int):
+    def __init__(self, channel: int, *args, **kwargs):
         """
         type: H,S,V = 0, 1, 2
         """
+        super().__init__(*args, **kwargs)
         self.channel = channel
 
     def create_mask(self, img: ndarray):
@@ -112,18 +113,18 @@ class HSV(AbstractSorter):
 
 
 class Hue(HSV):
-    def __init__(self):
-        super().__init__(0)
+    def __init__(self, *args, **kwargs):
+        super().__init__(0, *args, **kwargs)
 
 
 class Saturation(HSV):
-    def __init__(self):
-        super().__init__(1)
+    def __init__(self, *args, **kwargs):
+        super().__init__(1, *args, **kwargs)
 
 
 class Value(HSV):
-    def __init__(self):
-        super().__init__(2)
+    def __init__(self, *args, **kwargs):
+        super().__init__(2, *args, **kwargs)
 
 
 class Lightness(AbstractSorter):

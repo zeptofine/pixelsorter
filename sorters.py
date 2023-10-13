@@ -8,10 +8,6 @@ from numba import jit
 from numpy import ndarray
 
 
-Hi mom! I changed Stuff!
-
-
-
 def enumerate_via_indices(arr: ndarray, indices: ndarray) -> ndarray:
     lengths = np.hstack((indices[0], np.diff(indices), len(arr) - indices[-1]))
     stretched = np.repeat(np.arange(len(lengths)), lengths)
@@ -86,9 +82,7 @@ class AbstractSorter:
 
     def __repr__(self):
         attrlist = [
-            f"{key}=..."
-            if hasattr(val, "__iter__") and not isinstance(val, str)
-            else f"{key}={val}"
+            f"{key}=..." if hasattr(val, "__iter__") and not isinstance(val, str) else f"{key}={val}"
             for key, val in vars(self).items()  # type: ignore
         ]
         out = ", ".join(attrlist)
